@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en" %sveltekit.theme%>
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta name="theme-color" content="#000000" />
+		<meta name="color-scheme" content="dark light" />
+
+		<title>Particle Nexus</title>
+		<meta
+			name="description"
+			content="A beautiful, interactive browser start page with animated particles and dynamic wallpapers"
+		/>
+		<meta name="keywords" content="start page, homepage, particles, wallpaper, browser" />
+
+		<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
+		<link rel="dns-prefetch" href="https://fonts.googleapis.com" />
+
+		<link rel="preload" as="image" href="%sveltekit.assets%/wallpapers/" />
+
+		%sveltekit.head%
+
+		<style>
+			:root {
+				--font-system:
+					-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+					sans-serif;
+			}
+
+			*,
+			*::before,
+			*::after {
+				margin: 0;
+				padding: 0;
+				box-sizing: border-box;
+			}
+
+			html {
+				height: 100%;
+				overflow: hidden;
+				font-family: var(--font-system);
+				-webkit-font-smoothing: antialiased;
+				-moz-osx-font-smoothing: grayscale;
+				text-rendering: optimizeLegibility;
+			}
+
+			body {
+				height: 100%;
+				overflow: hidden;
+				background: #000;
+				user-select: none;
+				-webkit-user-select: none;
+				-ms-user-select: none;
+				touch-action: manipulation;
+			}
+
+			#svelte {
+				height: 100%;
+				width: 100%;
+			}
+
+			@media (prefers-reduced-motion: reduce) {
+				*,
+				*::before,
+				*::after {
+					animation-duration: 0.01ms !important;
+					animation-iteration-count: 1 !important;
+					transition-duration: 0.01ms !important;
+				}
+			}
+
+			@media (max-width: 768px) {
+				html {
+					font-size: 14px;
+				}
+			}
+		</style>
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div id="svelte" style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>
