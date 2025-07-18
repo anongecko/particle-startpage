@@ -1,17 +1,20 @@
 <script lang="ts">
-	import { onMount, onDestroy, tick } from 'svelte';
+	import { onMount, onDestroy, tick, beforeUpdate, afterUpdate } from 'svelte';
 	import { browser } from '$app/environment';
 	import { spring, tweened } from 'svelte/motion';
-	import { cubicOut } from 'svelte/easing';
+	import { cubicOut, quintOut } from 'svelte/easing';
 	
-	import Background from '$components/Background.svelte';
-	import ParticleSystem from '$components/ParticleSystem.svelte';
-	import SearchBar from '$components/SearchBar.svelte';
-	import BookmarkGrid from '$components/BookmarkGrid.svelte';
-	import SettingsPanel from '$components/SettingsPanel.svelte';
-	import SetupWizard from '$components/SetupWizard.svelte';
-	import LoadingScreen from '$components/LoadingScreen.svelte';
-	import ErrorBoundary from '$components/ErrorBoundary.svelte';
+	import {
+		Background,
+		ParticleSystem,
+		SearchBar,
+		BookmarkGrid,
+		SettingsPanel,
+		SetupWizard,
+		ErrorBoundary,
+		componentUtils,
+		COMPONENT_PRESETS
+	} from '$components';
 	
 	import { settingsStore, type Settings } from '$stores/settings';
 	import { wallpaperStore } from '$stores/wallpaper';
@@ -21,9 +24,17 @@
 	
 	import { handleKeyboardShortcuts } from '$lib/keyboard';
 	import { preloadWallpapers } from '$lib/wallpaper';
-	import { extractDominantColor } from '$lib/color';
+	import { 
+		initializeColorSystem,
+		extractDominantColor,
+		setCSSColorProperties,
+		clearColorCache,
+		warmUpCache,
+		colorUtils
+	} from '$lib/color';
 	import { debounce, throttle } from '$lib/utils';
 
+	// Component state
 	let mounted = false;
 	let isLoading = true;
 	let loadingError: string | null = null;
@@ -34,45 +45,98 @@
 	let windowHeight = 0;
 	let lastInteraction = Date.now();
 	let searchBarElement: HTMLElement;
+	let isInitialized = false;
 
-	// Smooth animations for state transitions
-	const uiOpacity = tweened(0, { duration: 800, easing: cubicOut });
-	const settingsOpacity = tweened(0, { duration: 300, easing: cubicOut });
-	const particleScale = spring(1, { stiffness: 0.1, damping: 0.8 });
+	// Performance monitoring
+	const perfMonitor = componentUtils.ComponentPerformanceMonitor.getInstance();
+	let frameCount = 0;
+	let lastFrameTime = 0;
+	let fps = 120;
 
+	// Enhanced animations optimized for 120fps
+	const uiOpacity = tweened(0, { 
+		duration: 600, 
+		easing: quintOut
+	});
+	const settingsOpacity = tweened(0, { 
+		duration: 200, 
+		easing: cubicOut 
+	});
+	const particleScale = spring(1, { 
+		stiffness: 0.08, 
+		damping: 0.82,
+		precision: 0.001
+	});
+	const loadingProgress = tweened(0, {
+		duration: 1200,
+		easing: cubicOut
+	});
+
+	// Reactive declarations
 	$: settings = $settingsStore;
 	$: wallpapers = $wallpaperStore;
 	$: bookmarks = $bookmarkStore;
 	$: isSetupComplete = $setupStore.isComplete;
 	$: dominantColor = $colorStore.current;
+	$: colorPalette = $colorStore.palette;
 
-	// Intelligent particle count based on device capabilities and screen size
-	$: particleCount = calculateOptimalParticleCount(windowWidth, windowHeight);
+	// Component configuration based on performance
+	$: componentConfig = settings?.performance?.mode 
+		? COMPONENT_PRESETS[settings.performance.mode]
+		: COMPONENT_PRESETS.high;
+
+	// Intelligent particle count with enhanced calculation
+	$: particleCount = calculateOptimalParticleCount(windowWidth, windowHeight, fps);
 	
-	// Auto-hide UI elements after inactivity (for immersive experience)
-	$: if (settings?.ui?.autoHideTimeout && lastInteraction) {
+	// Auto-hide UI with performance consideration
+	$: if (settings?.ui?.autoHideTimeout && lastInteraction && !showSettings) {
 		scheduleAutoHide();
 	}
 
-	const calculateOptimalParticleCount = (width: number, height: number): number => {
-		if (!width || !height) return 75;
+	// Font size reactive update
+	$: if (settings?.ui?.fontSize && browser) {
+		updateFontSize(settings.ui.fontSize);
+	}
+
+	// Color system integration
+	$: if (colorPalette && mounted) {
+		setCSSColorProperties(colorPalette);
+	}
+
+	const calculateOptimalParticleCount = (width: number, height: number, currentFps: number): number => {
+		if (!width || !height) return 60;
 		
 		const screenArea = width * height;
 		const pixelRatio = window.devicePixelRatio || 1;
-		const performanceMultiplier = pixelRatio > 2 ? 0.6 : pixelRatio > 1 ? 0.8 : 1;
+		const memoryGB = (navigator as any).deviceMemory || 4;
 		
-		// Base calculation on screen area with performance adjustments
-		const baseCount = Math.floor(screenArea / 30000);
-		const adjustedCount = Math.floor(baseCount * performanceMultiplier);
+		// Performance multipliers
+		const pixelMultiplier = pixelRatio > 2 ? 0.7 : pixelRatio > 1 ? 0.85 : 1;
+		const memoryMultiplier = memoryGB >= 8 ? 1.2 : memoryGB >= 4 ? 1 : 0.8;
+		const fpsMultiplier = currentFps >= 100 ? 1.3 : currentFps >= 60 ? 1 : 0.7;
 		
-		return Math.max(40, Math.min(120, adjustedCount));
+		// Base calculation with area scaling
+		const baseCount = Math.sqrt(screenArea) / 25;
+		const adjustedCount = Math.floor(
+			baseCount * pixelMultiplier * memoryMultiplier * fpsMultiplier
+		);
+		
+		// Performance mode adjustment
+		const modeMultiplier = componentConfig.performanceMode === 'high' ? 1.2 : 
+							  componentConfig.performanceMode === 'balanced' ? 1 : 0.6;
+		
+		return Math.max(30, Math.min(150, Math.floor(adjustedCount * modeMultiplier)));
+	};
+
+	const updateFontSize = (fontSize: string) => {
+		if (!browser) return;
+		document.body.setAttribute('data-font-size', fontSize);
 	};
 
 	const scheduleAutoHide = debounce(() => {
-		if (Date.now() - lastInteraction > (settings.ui?.autoHideTimeout || 30000)) {
-			if (!searchFocused && !showSettings) {
-				uiOpacity.set(0.7);
-			}
+		const timeout = settings.ui?.autoHideTimeout || 30000;
+		if (Date.now() - lastInteraction > timeout && !searchFocused && !showSettings) {
+			uiOpacity.set(0.6);
 		}
 	}, 1000);
 
@@ -83,24 +147,46 @@
 		}
 	};
 
+	const trackFPS = () => {
+		const now = performance.now();
+		frameCount++;
+		
+		if (now - lastFrameTime >= 1000) {
+			fps = Math.round((frameCount * 1000) / (now - lastFrameTime));
+			frameCount = 0;
+			lastFrameTime = now;
+			
+			// Adjust particle count if performance drops
+			if (fps < 90 && particleCount > 40) {
+				// Trigger recalculation with lower FPS
+			}
+		}
+		
+		if (mounted) {
+			requestAnimationFrame(trackFPS);
+		}
+	};
+
 	const keyboardHandler = (event: KeyboardEvent) => {
-		if (!mounted) return;
+		if (!mounted || !isInitialized) return;
 		updateInteraction();
 		
-		// Enhanced typing detection for search focus
+		// Enhanced typing detection
 		const isTyping = !event.ctrlKey && !event.altKey && !event.metaKey && 
-			event.key.length === 1 && /[a-zA-Z0-9\s]/.test(event.key);
+			event.key.length === 1 && /^[a-zA-Z0-9\s\-_.,!?@#$%^&*()+=<>{}[\]|\\:;"'`~]$/.test(event.key);
 		
 		if (isTyping && !searchFocused && !showSettings && document.activeElement === document.body) {
 			focusSearch();
-			return; // Let the character be typed in search
+			return;
 		}
 		
 		const result = handleKeyboardShortcuts(event, {
 			settings: settings,
 			onToggleSettings: toggleSettings,
 			onFocusSearch: focusSearch,
-			onEscape: handleEscape
+			onEscape: handleEscape,
+			onClearCache: () => clearColorCache(),
+			onTogglePerformanceMode: cyclePerformanceMode
 		});
 		
 		if (result.preventDefault) {
@@ -109,22 +195,42 @@
 	};
 
 	const focusSearch = async () => {
+		if (!searchBarElement || searchFocused) return;
+		
 		searchFocused = true;
 		await tick();
-		searchBarElement?.focus();
+		
+		// Enhanced focus with animation
+		try {
+			searchBarElement.focus();
+			searchBarElement.scrollIntoView({ 
+				behavior: 'smooth', 
+				block: 'center' 
+			});
+		} catch (error) {
+			console.warn('Failed to focus search:', error);
+		}
 	};
 
 	const toggleSettings = async () => {
-		if (showSettings) {
-			settingsOpacity.set(0);
-			await new Promise(resolve => setTimeout(resolve, 300));
-			showSettings = false;
-		} else {
-			showSettings = true;
-			await tick();
-			settingsOpacity.set(1);
+		const endRender = perfMonitor.startRender('settings-toggle');
+		
+		try {
+			if (showSettings) {
+				settingsOpacity.set(0);
+				await new Promise(resolve => setTimeout(resolve, 200));
+				showSettings = false;
+			} else {
+				showSettings = true;
+				await tick();
+				settingsOpacity.set(1);
+			}
+			
+			// Smooth particle scaling with spring physics
+			particleScale.set(showSettings ? 0.92 : 1);
+		} finally {
+			endRender();
 		}
-		particleScale.set(showSettings ? 0.95 : 1);
 	};
 
 	const handleEscape = () => {
@@ -132,70 +238,167 @@
 			toggleSettings();
 		} else if (searchFocused) {
 			searchFocused = false;
+			searchBarElement?.blur();
 			document.body.focus();
 		}
 	};
 
-	const handleWallpaperChange = debounce(async (imagePath: string) => {
-		if (!imagePath || imagePath === currentWallpaper) return;
+	const cyclePerformanceMode = () => {
+		const modes = ['high', 'balanced', 'low'] as const;
+		const currentIndex = modes.indexOf(settings.performance?.mode || 'high');
+		const nextMode = modes[(currentIndex + 1) % modes.length];
 		
+		settingsStore.update({
+			...settings,
+			performance: { ...settings.performance, mode: nextMode }
+		});
+	};
+
+	const handleWallpaperChange = debounce(async (imagePath: string) => {
+		if (!imagePath || imagePath === currentWallpaper || !mounted) return;
+		
+		const endRender = perfMonitor.startRender('wallpaper-change');
 		currentWallpaper = imagePath;
+		
 		try {
-			const color = await extractDominantColor(imagePath);
+			// Clear cache and extract new color
+			clearColorCache();
+			
+			const color = await extractDominantColor(imagePath, {
+				quality: componentConfig.performanceMode === 'high' ? 'high' : 'balanced'
+			});
+			
+			// Update store which will trigger CSS property updates
 			colorStore.setDominantColor(color);
+			
+			// Warm cache for the new palette
+			if ($colorStore.palette) {
+				warmUpCache($colorStore.palette);
+			}
+			
 		} catch (error) {
 			console.warn('Failed to extract color from wallpaper:', error);
-			// Fallback to default color
 			colorStore.setDominantColor('#4a90e2');
+		} finally {
+			endRender();
 		}
-	}, 150);
+	}, 120);
 
 	const handleResize = throttle(() => {
 		windowWidth = window.innerWidth;
 		windowHeight = window.innerHeight;
-	}, 100);
+		
+		// Update CSS viewport variables
+		if (browser) {
+			const root = document.documentElement;
+			root.style.setProperty('--window-width', `${windowWidth}px`);
+			root.style.setProperty('--window-height', `${windowHeight}px`);
+		}
+	}, 50);
 
-	// Touch gesture support for mobile
 	const handleTouchStart = (event: TouchEvent) => {
 		updateInteraction();
+		
+		// Enhanced gesture detection
 		if (event.touches.length === 2) {
-			// Two-finger tap to toggle settings
 			event.preventDefault();
 			toggleSettings();
+		} else if (event.touches.length === 3) {
+			event.preventDefault();
+			cyclePerformanceMode();
+		}
+	};
+
+	const handleVisibilityChange = () => {
+		if (document.hidden) {
+			// Pause animations when tab is hidden
+			particleScale.set(0.8, { duration: 0 });
+		} else {
+			// Resume animations
+			particleScale.set(showSettings ? 0.92 : 1);
+			updateInteraction();
 		}
 	};
 
 	const initializeApp = async () => {
+		const endRender = perfMonitor.startRender('app-initialization');
+		
 		try {
 			isLoading = true;
 			loadingError = null;
+			loadingProgress.set(0);
 
-			// Initialize all stores in parallel
-			const initPromises = [
+			// Initialize color system first
+			await initializeColorSystem();
+			loadingProgress.set(20);
+
+			// Initialize stores in optimized order
+			const storeInitPromises = [
 				settingsStore.initialize(),
-				wallpaperStore.initialize(),
-				bookmarkStore.initialize(),
 				setupStore.initialize()
 			];
+			
+			await Promise.allSettled(storeInitPromises);
+			loadingProgress.set(50);
 
-			await Promise.allSettled(initPromises);
+			// Initialize wallpaper and bookmark stores
+			const secondaryPromises = [
+				wallpaperStore.initialize(),
+				bookmarkStore.initialize()
+			];
+			
+			await Promise.allSettled(secondaryPromises);
+			loadingProgress.set(80);
 
-			// Preload initial wallpapers
+			// Preload critical wallpapers
 			if ($wallpaperStore.currentTheme && $wallpaperStore.images.length > 0) {
-				preloadWallpapers($wallpaperStore.images.slice(0, 3));
+				const criticalImages = $wallpaperStore.images.slice(0, 2);
+				await preloadWallpapers(criticalImages);
+			}
+			
+			loadingProgress.set(95);
+
+			// Apply initial font size if set
+			if (settings?.ui?.fontSize) {
+				updateFontSize(settings.ui.fontSize);
 			}
 
-			// Smooth UI entrance
+			// Smooth UI entrance with stagger
 			await tick();
-			uiOpacity.set(1);
+			loadingProgress.set(100);
 			
+			// Staggered animation entrance
+			setTimeout(() => uiOpacity.set(1), 100);
+			
+			isInitialized = true;
+
 		} catch (error) {
 			console.error('Failed to initialize app:', error);
 			loadingError = 'Failed to load application. Please refresh the page.';
 		} finally {
 			isLoading = false;
+			endRender();
 		}
 	};
+
+	// Performance optimization hooks
+	beforeUpdate(() => {
+		if (mounted) {
+			const endRender = perfMonitor.startRender('component-update');
+			// Will be called after update completes
+			tick().then(endRender);
+		}
+	});
+
+	afterUpdate(() => {
+		// Ensure smooth animations after updates
+		if (mounted && componentConfig.useGPUAcceleration) {
+			const elements = document.querySelectorAll('.gpu, .animate-smooth');
+			elements.forEach(el => {
+				(el as HTMLElement).style.transform += ' translateZ(0)';
+			});
+		}
+	});
 
 	onMount(async () => {
 		if (!browser) return;
@@ -203,37 +406,85 @@
 		mounted = true;
 		handleResize();
 		
-		// Event listeners
-		window.addEventListener('keydown', keyboardHandler);
-		window.addEventListener('resize', handleResize);
-		window.addEventListener('mousemove', updateInteraction);
-		window.addEventListener('touchstart', handleTouchStart, { passive: false });
-		window.addEventListener('click', updateInteraction);
+		// Start FPS tracking
+		requestAnimationFrame(trackFPS);
+		
+		// Enhanced event listeners with optimized options
+		const eventOptions = { passive: true, capture: false };
+		const nonPassiveOptions = { passive: false, capture: false };
+		
+		window.addEventListener('keydown', keyboardHandler, nonPassiveOptions);
+		window.addEventListener('resize', handleResize, eventOptions);
+		window.addEventListener('mousemove', updateInteraction, eventOptions);
+		window.addEventListener('touchstart', handleTouchStart, nonPassiveOptions);
+		window.addEventListener('click', updateInteraction, eventOptions);
+		window.addEventListener('wheel', updateInteraction, eventOptions);
+		document.addEventListener('visibilitychange', handleVisibilityChange, eventOptions);
 
+		// Initialize application
 		await initializeApp();
+
+		// Enable hot reload in development
+		if (import.meta.env.DEV) {
+			colorUtils.componentUtils.enableComponentHotReload();
+		}
 	});
 
 	onDestroy(() => {
-		if (browser) {
-			window.removeEventListener('keydown', keyboardHandler);
-			window.removeEventListener('resize', handleResize);
-			window.removeEventListener('mousemove', updateInteraction);
-			window.removeEventListener('touchstart', handleTouchStart);
-			window.removeEventListener('click', updateInteraction);
-		}
+		if (!browser) return;
+		
+		mounted = false;
+		
+		// Clean up event listeners
+		window.removeEventListener('keydown', keyboardHandler);
+		window.removeEventListener('resize', handleResize);
+		window.removeEventListener('mousemove', updateInteraction);
+		window.removeEventListener('touchstart', handleTouchStart);
+		window.removeEventListener('click', updateInteraction);
+		window.removeEventListener('wheel', updateInteraction);
+		document.removeEventListener('visibilitychange', handleVisibilityChange);
+		
+		// Clean up performance monitoring
+		perfMonitor.reset();
+		
+		// Clean up color cache
+		clearColorCache();
 	});
 </script>
 
 <svelte:window bind:innerWidth={windowWidth} bind:innerHeight={windowHeight} />
 
 <main 
-	class="start-page" 
+	class="start-page gpu color-transition"
 	class:setup-mode={!isSetupComplete}
 	class:settings-open={showSettings}
-	style="--ui-opacity: {$uiOpacity}; --particle-scale: {$particleScale}"
+	class:loading={isLoading}
+	class:high-performance={componentConfig.performanceMode === 'high'}
+	style="
+		--ui-opacity: {$uiOpacity}; 
+		--particle-scale: {$particleScale};
+		--loading-progress: {$loadingProgress}%;
+		--fps: {fps};
+	"
 >
 	{#if isLoading}
-		<LoadingScreen />
+		<div class="loading-screen glass-light flex-center">
+			<div class="loading-content text-center">
+				<div class="loading-spinner animate-spin"></div>
+				<h2 class="text-xl m-4">Initializing Particle Nexus</h2>
+				<div class="progress-bar">
+					<div 
+						class="progress-fill color-transition" 
+						style="width: {$loadingProgress}%"
+					></div>
+				</div>
+				<p class="text-secondary text-sm m-2">
+					{$loadingProgress < 30 ? 'Loading color system...' :
+					 $loadingProgress < 60 ? 'Initializing settings...' :
+					 $loadingProgress < 90 ? 'Loading wallpapers...' : 'Almost ready...'}
+				</p>
+			</div>
+		</div>
 	{:else if loadingError}
 		<ErrorBoundary error={loadingError} onRetry={initializeApp} />
 	{:else}
@@ -245,46 +496,57 @@
 		/>
 		
 		<!-- Particle System Layer -->
-		{#if mounted && isSetupComplete}
-			<div class="particle-container" style="transform: scale({$particleScale})">
+		{#if mounted && isSetupComplete && isInitialized}
+			<div 
+				class="particle-container gpu animate-smooth" 
+				style="transform: scale({$particleScale})"
+				role="presentation"
+				aria-hidden="true"
+			>
 				<ParticleSystem
 					count={particleCount}
 					{windowWidth}
 					{windowHeight}
 					{dominantColor}
 					settings={settings.particles}
+					config={componentConfig}
 				/>
 			</div>
 		{/if}
 		
 		<!-- UI Layer -->
-		{#if isSetupComplete}
-			<div class="ui-layer" style="opacity: var(--ui-opacity)">
+		{#if isSetupComplete && isInitialized}
+			<div class="ui-layer animate-smooth" style="opacity: var(--ui-opacity)">
 				<div class="main-content">
 					<SearchBar
 						bind:element={searchBarElement}
 						bind:focused={searchFocused}
 						{dominantColor}
 						{settings}
+						config={componentConfig}
 						on:focus={updateInteraction}
 						on:blur={() => searchFocused = false}
+						on:search={updateInteraction}
 					/>
 					
 					<BookmarkGrid
 						bookmarks={$bookmarkStore}
 						{dominantColor}
 						{settings}
+						config={componentConfig}
 						on:interact={updateInteraction}
+						on:bookmark-click={updateInteraction}
 					/>
 				</div>
 				
 				<!-- Enhanced Settings Toggle -->
 				<button
-					class="settings-toggle"
+					class="settings-toggle glass hover-lift hover-glow animate-smooth"
 					class:active={showSettings}
 					on:click={toggleSettings}
 					title="Settings ({settings.keyboard?.modifierKey || 'Ctrl'} + S)"
 					aria-label="Open settings panel"
+					aria-expanded={showSettings}
 				>
 					<div class="settings-icon" class:spinning={showSettings}>
 						<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -294,23 +556,42 @@
 						</svg>
 					</div>
 				</button>
+				
+				<!-- Performance indicator (dev mode) -->
+				{#if import.meta.env.DEV && componentConfig.debugMode}
+					<div class="performance-indicator fixed top-4 left-4 text-xs text-tertiary">
+						<div>FPS: {fps}</div>
+						<div>Particles: {particleCount}</div>
+						<div>Mode: {componentConfig.performanceMode}</div>
+					</div>
+				{/if}
 			</div>
 			
 			<!-- Settings Panel Overlay -->
 			{#if showSettings}
-				<div class="settings-overlay" style="opacity: {$settingsOpacity}">
+				<div 
+					class="settings-overlay glass-ultra animate-fast" 
+					style="opacity: {$settingsOpacity}"
+					role="dialog"
+					aria-modal="true"
+					aria-labelledby="settings-title"
+				>
 					<SettingsPanel
 						{settings}
 						wallpapers={$wallpaperStore}
+						config={componentConfig}
 						on:close={toggleSettings}
 						on:settingsUpdate={(e) => settingsStore.update(e.detail)}
+						on:font-size-change={(e) => updateFontSize(e.detail)}
 					/>
 				</div>
 			{/if}
 		{:else}
 			<!-- Setup Wizard -->
 			<SetupWizard
+				config={componentConfig}
 				on:complete={() => setupStore.markComplete()}
+				on:skip={() => setupStore.markComplete()}
 			/>
 		{/if}
 	{/if}
@@ -322,30 +603,35 @@
 		width: 100vw;
 		height: 100vh;
 		overflow: hidden;
-		background: #000;
-		color: #fff;
-		transition: filter 0.3s ease;
+		background: var(--neutral-black);
+		color: var(--neutral-white);
+		transition: filter var(--duration-normal) var(--easing-ease);
 	}
 	
 	.start-page.settings-open {
 		filter: blur(1px) brightness(0.8);
 	}
 	
+	.start-page.high-performance {
+		transform: translate3d(0, 0, 0);
+		backface-visibility: hidden;
+	}
+	
 	.particle-container {
 		transform-origin: center;
-		transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+		transition: transform var(--duration-slower) var(--easing-spring);
 		will-change: transform;
 	}
 	
 	.ui-layer {
 		position: relative;
-		z-index: 100;
+		z-index: var(--z-base);
 		width: 100%;
 		height: 100%;
 		display: flex;
 		flex-direction: column;
 		pointer-events: none;
-		transition: opacity 0.3s ease;
+		transition: opacity var(--duration-normal) var(--easing-ease);
 		will-change: opacity;
 	}
 	
@@ -355,8 +641,8 @@
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 2rem;
-		padding: 2rem;
+		gap: var(--space-8);
+		padding: var(--space-8);
 		pointer-events: none;
 	}
 	
@@ -366,31 +652,31 @@
 	
 	.settings-toggle {
 		position: fixed;
-		top: 1.5rem;
-		right: 1.5rem;
-		z-index: 200;
+		top: var(--space-6);
+		right: var(--space-6);
+		z-index: var(--z-sticky);
 		width: 2.5rem;
 		height: 2.5rem;
 		border: none;
-		border-radius: 50%;
-		background: rgba(255, 255, 255, 0.08);
-		backdrop-filter: blur(20px);
-		color: rgba(255, 255, 255, 0.7);
+		border-radius: var(--radius-full);
+		background: var(--glass-surface-2);
+		backdrop-filter: var(--blur-lg);
+		color: var(--neutral-gray-300);
 		cursor: pointer;
-		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 		pointer-events: auto;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		box-shadow: var(--shadow-lg);
+		border: 1px solid var(--glass-border-1);
+		transition: all var(--duration-normal) var(--easing-spring);
 	}
 	
 	.settings-toggle:hover {
-		background: rgba(255, 255, 255, 0.15);
-		color: rgba(255, 255, 255, 0.9);
+		background: var(--glass-surface-3);
+		color: var(--neutral-white);
 		transform: translateY(-2px) scale(1.05);
-		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+		box-shadow: var(--shadow-xl);
 	}
 	
 	.settings-toggle:active {
@@ -398,13 +684,13 @@
 	}
 	
 	.settings-toggle.active {
-		background: rgba(255, 255, 255, 0.2);
-		color: #fff;
-		transform: translateY(-2px) scale(1.05);
+		background: var(--glass-surface-3);
+		color: var(--neutral-white);
+		box-shadow: var(--shadow-glow);
 	}
 	
 	.settings-icon {
-		transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+		transition: transform var(--duration-slow) var(--easing-spring);
 	}
 	
 	.settings-icon.spinning {
@@ -417,10 +703,10 @@
 		left: 0;
 		width: 100%;
 		height: 100%;
-		z-index: 300;
-		backdrop-filter: blur(10px);
-		background: rgba(0, 0, 0, 0.2);
-		transition: opacity 0.3s ease;
+		z-index: var(--z-overlay);
+		backdrop-filter: var(--blur-md);
+		background: rgba(0, 0, 0, 0.3);
+		transition: opacity var(--duration-normal) var(--easing-ease);
 		will-change: opacity;
 	}
 	
@@ -428,15 +714,77 @@
 		background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
 	}
 	
+	/* Loading Screen Styles */
+	.loading-screen {
+		position: fixed;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		z-index: var(--z-modal);
+		backdrop-filter: var(--blur-xl);
+	}
+	
+	.loading-content {
+		max-width: 300px;
+	}
+	
+	.loading-spinner {
+		width: 3rem;
+		height: 3rem;
+		border: 3px solid var(--neutral-gray-700);
+		border-top: 3px solid var(--color-vibrant);
+		border-radius: var(--radius-full);
+		margin: 0 auto var(--space-4);
+	}
+	
+	.progress-bar {
+		width: 100%;
+		height: 4px;
+		background: var(--neutral-gray-800);
+		border-radius: var(--radius-full);
+		overflow: hidden;
+		margin: var(--space-4) 0;
+	}
+	
+	.progress-fill {
+		height: 100%;
+		background: linear-gradient(90deg, var(--color-vibrant), var(--color-accent));
+		border-radius: var(--radius-full);
+		transition: width var(--duration-normal) var(--easing-ease);
+	}
+	
+	.performance-indicator {
+		background: var(--glass-surface-1);
+		backdrop-filter: var(--blur-sm);
+		padding: var(--space-2);
+		border-radius: var(--radius-md);
+		border: 1px solid var(--glass-border-1);
+		font-family: monospace;
+		pointer-events: none;
+		z-index: var(--z-tooltip);
+	}
+	
+	/* Animation utilities */
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
+	}
+	
+	.animate-spin {
+		animation: spin 1s linear infinite;
+	}
+	
+	/* Responsive design */
 	@media (max-width: 768px) {
 		.main-content {
-			gap: 1.5rem;
-			padding: 1rem;
+			gap: var(--space-6);
+			padding: var(--space-4);
 		}
 		
 		.settings-toggle {
-			top: 1rem;
-			right: 1rem;
+			top: var(--space-4);
+			right: var(--space-4);
 			width: 2.25rem;
 			height: 2.25rem;
 		}
@@ -444,8 +792,8 @@
 	
 	@media (max-width: 480px) {
 		.main-content {
-			gap: 1rem;
-			padding: 0.75rem;
+			gap: var(--space-4);
+			padding: var(--space-3);
 		}
 		
 		.settings-toggle {
@@ -454,9 +802,35 @@
 		}
 	}
 	
+	/* Touch device optimizations */
 	@media (hover: none) and (pointer: coarse) {
 		.settings-toggle:hover {
 			transform: none;
+		}
+		
+		.settings-toggle:active {
+			transform: scale(0.95);
+		}
+	}
+	
+	/* High refresh rate optimizations */
+	@media (min-refresh-rate: 90hz) {
+		.start-page.high-performance * {
+			animation-fill-mode: both;
+		}
+	}
+	
+	/* Reduced motion support */
+	@media (prefers-reduced-motion: reduce) {
+		.settings-icon,
+		.particle-container,
+		.loading-spinner {
+			animation: none !important;
+			transition: none !important;
+		}
+		
+		.settings-icon.spinning {
+			transform: rotate(45deg);
 		}
 	}
 </style>
