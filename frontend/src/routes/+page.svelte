@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy, tick, beforeUpdate, afterUpdate } from 'svelte';
+	import { onMount, onDestroy, tick, setContext, beforeUpdate, afterUpdate } from 'svelte';
 	import { browser } from '$app/environment';
 	import { spring, tweened } from 'svelte/motion';
 	import { cubicOut, quintOut } from 'svelte/easing';
@@ -13,15 +13,17 @@
 		SetupWizard,
 		ErrorBoundary,
 		componentUtils,
-		COMPONENT_PRESETS
+		COMPONENT_PRESETS,
+		ThreeDComponents
 	} from '$components';
 	
 	import { settingsStore, type Settings } from '$stores/settings';
 	import { wallpaperStore } from '$stores/wallpaper';
-	import { bookmarkStore } from '$stores/bookmarks';
+	import { bookmarkStore, migrationStatus, object3DAnalytics } from '$stores/bookmarks';
 	import { colorStore } from '$stores/color';
 	import { setupStore } from '$stores/setup';
 	
+	import { ThreeRenderer } from '$lib/three-renderer';
 	import { handleKeyboardShortcuts } from '$lib/keyboard';
 	import { preloadWallpapers } from '$lib/wallpaper';
 	import { 
@@ -34,10 +36,11 @@
 	} from '$lib/color';
 	import { debounce, throttle } from '$lib/utils';
 
-	// Component state
+	// Enhanced component state with 3D support
 	let mounted = false;
 	let isLoading = true;
 	let loadingError: string | null = null;
+	let webGLError: string | null = null;
 	let searchFocused = false;
 	let showSettings = false;
 	let currentWallpaper = '';
@@ -47,13 +50,22 @@
 	let searchBarElement: HTMLElement;
 	let isInitialized = false;
 
-	// Performance monitoring
+	// 3D System state
+	let sharedThreeRenderer: ThreeRenderer | null = null;
+	let webGLSupported = true;
+	let webGLInitialized = false;
+	let threeDEnabled = true;
+
+	// Performance monitoring with 3D metrics
 	const perfMonitor = componentUtils.ComponentPerformanceMonitor.getInstance();
+	const threeDOptimizer = componentUtils.ThreeDPerformanceOptimizer.getInstance();
 	let frameCount = 0;
 	let lastFrameTime = 0;
 	let fps = 120;
+	let object3DCount = 0;
+	let memoryUsage = 0;
 
-	// Enhanced animations optimized for 120fps
+	// Enhanced animations optimized for 120fps + 3D
 	const uiOpacity = tweened(0, { 
 		duration: 600, 
 		easing: quintOut
@@ -71,25 +83,35 @@
 		duration: 1200,
 		easing: cubicOut
 	});
+	const threeDTransition = spring(1, {
+		stiffness: 0.1,
+		damping: 0.8
+	});
 
-	// Reactive declarations
+	// Reactive declarations with 3D integration
 	$: settings = $settingsStore;
 	$: wallpapers = $wallpaperStore;
 	$: bookmarks = $bookmarkStore;
 	$: isSetupComplete = $setupStore.isComplete;
 	$: dominantColor = $colorStore.current;
 	$: colorPalette = $colorStore.palette;
+	$: migration = $migrationStatus;
+	$: threeDStats = $object3DAnalytics;
 
-	// Component configuration based on performance
-	$: componentConfig = settings?.performance?.mode 
-		? COMPONENT_PRESETS[settings.performance.mode]
-		: COMPONENT_PRESETS.high;
+	// Enhanced component configuration with 3D support
+	$: componentConfig = {
+		...COMPONENT_PRESETS[settings?.performance?.mode || 'high'],
+		enable3D: threeDEnabled && webGLSupported,
+		fallbackTo2D: true,
+		performanceLevel: settings?.performance3D || 'high',
+		lodEnabled: true
+	};
 
-	// Intelligent particle count with enhanced calculation
-	$: particleCount = calculateOptimalParticleCount(windowWidth, windowHeight, fps);
+	// Intelligent particle count with 3D consideration
+	$: particleCount = calculateOptimalParticleCount(windowWidth, windowHeight, fps, object3DCount);
 	
-	// Auto-hide UI with performance consideration
-	$: if (settings?.ui?.autoHideTimeout && lastInteraction && !showSettings) {
+	// Auto-hide UI with enhanced consideration for 3D interactions
+	$: if (settings?.ui?.autoHideTimeout && lastInteraction && !showSettings && !searchFocused) {
 		scheduleAutoHide();
 	}
 
@@ -98,45 +120,111 @@
 		updateFontSize(settings.ui.fontSize);
 	}
 
-	// Color system integration
+	// Color system integration with 3D renderer
 	$: if (colorPalette && mounted) {
 		setCSSColorProperties(colorPalette);
+		if (sharedThreeRenderer) {
+			sharedThreeRenderer.updateWallpaperColors(dominantColor);
+		}
 	}
 
-	const calculateOptimalParticleCount = (width: number, height: number, currentFps: number): number => {
-		if (!width || !height) return 60;
+	// 3D performance monitoring
+	$: if (sharedThreeRenderer && mounted) {
+		const metrics = sharedThreeRenderer.getPerformanceMetrics();
+		object3DCount = Object.keys(threeDStats.usage || {}).length;
+		memoryUsage = metrics.memoryUsage || 0;
+		
+		// Feed FPS data to optimizer
+		threeDOptimizer.recordFrameRate(metrics.fps || fps);
+	}
+
+	// Set up Three.js context for child components
+	setContext('threeRenderer', sharedThreeRenderer);
+	setContext('webGLSupported', webGLSupported);
+	setContext('threeDConfig', componentConfig);
+
+	const calculateOptimalParticleCount = (width: number, height: number, currentFps: number, activeObjects: number): number => {
+		if (!width || !height) return 40;
 		
 		const screenArea = width * height;
 		const pixelRatio = window.devicePixelRatio || 1;
 		const memoryGB = (navigator as any).deviceMemory || 4;
 		
-		// Performance multipliers
-		const pixelMultiplier = pixelRatio > 2 ? 0.7 : pixelRatio > 1 ? 0.85 : 1;
-		const memoryMultiplier = memoryGB >= 8 ? 1.2 : memoryGB >= 4 ? 1 : 0.8;
-		const fpsMultiplier = currentFps >= 100 ? 1.3 : currentFps >= 60 ? 1 : 0.7;
+		// Enhanced multipliers considering 3D objects
+		const pixelMultiplier = pixelRatio > 2 ? 0.6 : pixelRatio > 1 ? 0.8 : 1;
+		const memoryMultiplier = memoryGB >= 8 ? 1.2 : memoryGB >= 4 ? 1 : 0.7;
+		const fpsMultiplier = currentFps >= 100 ? 1.3 : currentFps >= 60 ? 1 : 0.6;
+		const objectMultiplier = Math.max(0.3, 1 - (activeObjects * 0.05)); // Reduce particles with more 3D objects
 		
 		// Base calculation with area scaling
-		const baseCount = Math.sqrt(screenArea) / 25;
+		const baseCount = Math.sqrt(screenArea) / 30; // Slightly reduced base
 		const adjustedCount = Math.floor(
-			baseCount * pixelMultiplier * memoryMultiplier * fpsMultiplier
+			baseCount * pixelMultiplier * memoryMultiplier * fpsMultiplier * objectMultiplier
 		);
 		
-		// Performance mode adjustment
-		const modeMultiplier = componentConfig.performanceMode === 'high' ? 1.2 : 
-							  componentConfig.performanceMode === 'balanced' ? 1 : 0.6;
+		// Performance mode adjustment with 3D consideration
+		const modeMultiplier = componentConfig.performanceLevel === 'high' ? 1.1 : 
+							  componentConfig.performanceLevel === 'medium' ? 0.9 : 0.5;
 		
-		return Math.max(30, Math.min(150, Math.floor(adjustedCount * modeMultiplier)));
+		return Math.max(20, Math.min(120, Math.floor(adjustedCount * modeMultiplier)));
+	};
+
+	const initializeThreeJS = async (): Promise<boolean> => {
+		if (!browser || !threeDEnabled) return false;
+		
+		try {
+			// Create invisible canvas for shared renderer
+			const canvas = document.createElement('canvas');
+			canvas.style.position = 'absolute';
+			canvas.style.top = '0';
+			canvas.style.left = '0';
+			canvas.style.width = '100%';
+			canvas.style.height = '100%';
+			canvas.style.pointerEvents = 'none';
+			canvas.style.zIndex = '-1';
+			
+			// Append to document for WebGL context
+			document.body.appendChild(canvas);
+			
+			// Initialize renderer
+			sharedThreeRenderer = new ThreeRenderer(canvas);
+			webGLInitialized = true;
+			
+			// Update context
+			setContext('threeRenderer', sharedThreeRenderer);
+			
+			console.log('Shared Three.js renderer initialized successfully');
+			return true;
+			
+		} catch (error) {
+			console.warn('Three.js initialization failed:', error);
+			webGLSupported = false;
+			webGLError = 'WebGL not supported on this device';
+			setContext('webGLSupported', false);
+			return false;
+		}
 	};
 
 	const updateFontSize = (fontSize: string) => {
 		if (!browser) return;
 		document.body.setAttribute('data-font-size', fontSize);
+		
+		// Update CSS custom property for 3D object scaling
+		document.documentElement.style.setProperty('--font-size-multiplier', 
+			fontSize === 'xs' ? '0.8' :
+			fontSize === 'sm' ? '0.9' :
+			fontSize === 'lg' ? '1.1' :
+			fontSize === 'xl' ? '1.2' :
+			fontSize === '2xl' ? '1.3' : '1.0'
+		);
 	};
 
 	const scheduleAutoHide = debounce(() => {
 		const timeout = settings.ui?.autoHideTimeout || 30000;
 		if (Date.now() - lastInteraction > timeout && !searchFocused && !showSettings) {
 			uiOpacity.set(0.6);
+			// Reduce 3D activity when UI is hidden
+			threeDTransition.set(0.8);
 		}
 	}, 1000);
 
@@ -144,6 +232,7 @@
 		lastInteraction = Date.now();
 		if ($uiOpacity < 1) {
 			uiOpacity.set(1);
+			threeDTransition.set(1);
 		}
 	};
 
@@ -156,9 +245,13 @@
 			frameCount = 0;
 			lastFrameTime = now;
 			
-			// Adjust particle count if performance drops
-			if (fps < 90 && particleCount > 40) {
-				// Trigger recalculation with lower FPS
+			// Auto-adjust 3D quality based on performance
+			if (fps < 45 && componentConfig.performanceLevel === 'high') {
+				console.log('Performance degraded, reducing 3D quality');
+				settingsStore.update({
+					...settings,
+					performance3D: 'medium'
+				});
 			}
 		}
 		
@@ -186,7 +279,9 @@
 			onFocusSearch: focusSearch,
 			onEscape: handleEscape,
 			onClearCache: () => clearColorCache(),
-			onTogglePerformanceMode: cyclePerformanceMode
+			onTogglePerformanceMode: cyclePerformanceMode,
+			onToggle3D: () => toggle3DMode(),
+			onResetThreeJS: () => reinitializeThreeJS()
 		});
 		
 		if (result.preventDefault) {
@@ -200,7 +295,6 @@
 		searchFocused = true;
 		await tick();
 		
-		// Enhanced focus with animation
 		try {
 			searchBarElement.focus();
 			searchBarElement.scrollIntoView({ 
@@ -226,8 +320,9 @@
 				settingsOpacity.set(1);
 			}
 			
-			// Smooth particle scaling with spring physics
-			particleScale.set(showSettings ? 0.92 : 1);
+			// Enhanced particle and 3D scaling
+			particleScale.set(showSettings ? 0.88 : 1);
+			threeDTransition.set(showSettings ? 0.9 : 1);
 		} finally {
 			endRender();
 		}
@@ -244,7 +339,7 @@
 	};
 
 	const cyclePerformanceMode = () => {
-		const modes = ['high', 'balanced', 'low'] as const;
+		const modes = ['high', 'medium', 'low'] as const;
 		const currentIndex = modes.indexOf(settings.performance?.mode || 'high');
 		const nextMode = modes[(currentIndex + 1) % modes.length];
 		
@@ -254,6 +349,28 @@
 		});
 	};
 
+	const toggle3DMode = () => {
+		threeDEnabled = !threeDEnabled;
+		settingsStore.update({
+			...settings,
+			enable3DObjects: threeDEnabled
+		});
+		
+		if (threeDEnabled && !webGLInitialized) {
+			initializeThreeJS();
+		}
+	};
+
+	const reinitializeThreeJS = async () => {
+		if (sharedThreeRenderer) {
+			sharedThreeRenderer.dispose();
+			sharedThreeRenderer = null;
+		}
+		
+		webGLError = null;
+		await initializeThreeJS();
+	};
+
 	const handleWallpaperChange = debounce(async (imagePath: string) => {
 		if (!imagePath || imagePath === currentWallpaper || !mounted) return;
 		
@@ -261,17 +378,19 @@
 		currentWallpaper = imagePath;
 		
 		try {
-			// Clear cache and extract new color
 			clearColorCache();
 			
 			const color = await extractDominantColor(imagePath, {
-				quality: componentConfig.performanceMode === 'high' ? 'high' : 'balanced'
+				quality: componentConfig.performanceLevel === 'high' ? 'high' : 'balanced'
 			});
 			
-			// Update store which will trigger CSS property updates
 			colorStore.setDominantColor(color);
 			
-			// Warm cache for the new palette
+			// Update 3D renderer colors
+			if (sharedThreeRenderer) {
+				sharedThreeRenderer.updateWallpaperColors(color);
+			}
+			
 			if ($colorStore.palette) {
 				warmUpCache($colorStore.palette);
 			}
@@ -288,11 +407,15 @@
 		windowWidth = window.innerWidth;
 		windowHeight = window.innerHeight;
 		
-		// Update CSS viewport variables
 		if (browser) {
 			const root = document.documentElement;
 			root.style.setProperty('--window-width', `${windowWidth}px`);
 			root.style.setProperty('--window-height', `${windowHeight}px`);
+		}
+		
+		// Update Three.js renderer size
+		if (sharedThreeRenderer) {
+			// Renderer will handle resize internally via resize observer
 		}
 	}, 50);
 
@@ -305,19 +428,35 @@
 			toggleSettings();
 		} else if (event.touches.length === 3) {
 			event.preventDefault();
-			cyclePerformanceMode();
+			toggle3DMode();
 		}
 	};
 
 	const handleVisibilityChange = () => {
 		if (document.hidden) {
-			// Pause animations when tab is hidden
-			particleScale.set(0.8, { duration: 0 });
+			particleScale.set(0.7, { duration: 0 });
+			threeDTransition.set(0.5, { duration: 0 });
 		} else {
-			// Resume animations
-			particleScale.set(showSettings ? 0.92 : 1);
+			particleScale.set(showSettings ? 0.88 : 1);
+			threeDTransition.set(showSettings ? 0.9 : 1);
 			updateInteraction();
 		}
+	};
+
+	const handle3DPerformanceLevelChange = (event: CustomEvent) => {
+		const { level } = event.detail;
+		console.log(`3D performance level auto-adjusted to: ${level}`);
+		
+		// Update settings store
+		settingsStore.update({
+			...settings,
+			performance3D: level
+		});
+	};
+
+	const handleObjectSelectorOpen = (event: CustomEvent) => {
+		updateInteraction();
+		// This will be handled by BookmarkGrid component
 	};
 
 	const initializeApp = async () => {
@@ -330,7 +469,13 @@
 
 			// Initialize color system first
 			await initializeColorSystem();
-			loadingProgress.set(20);
+			loadingProgress.set(15);
+
+			// Initialize WebGL/3D system early
+			if (threeDEnabled) {
+				await initializeThreeJS();
+			}
+			loadingProgress.set(30);
 
 			// Initialize stores in optimized order
 			const storeInitPromises = [
@@ -339,31 +484,36 @@
 			];
 			
 			await Promise.allSettled(storeInitPromises);
-			loadingProgress.set(50);
+			loadingProgress.set(55);
 
-			// Initialize wallpaper and bookmark stores
+			// Initialize secondary stores
 			const secondaryPromises = [
 				wallpaperStore.initialize(),
 				bookmarkStore.initialize()
 			];
 			
 			await Promise.allSettled(secondaryPromises);
-			loadingProgress.set(80);
+			loadingProgress.set(75);
+
+			// Handle 3D migration if needed
+			if (migration.hasLegacyIcons && !migration.migrationCompleted) {
+				console.log('Starting 3D object migration...');
+				// Migration is handled automatically in bookmark store
+			}
+			loadingProgress.set(85);
 
 			// Preload critical wallpapers
 			if ($wallpaperStore.currentTheme && $wallpaperStore.images.length > 0) {
 				const criticalImages = $wallpaperStore.images.slice(0, 2);
 				await preloadWallpapers(criticalImages);
 			}
-			
 			loadingProgress.set(95);
 
-			// Apply initial font size if set
+			// Apply initial font size
 			if (settings?.ui?.fontSize) {
 				updateFontSize(settings.ui.fontSize);
 			}
 
-			// Smooth UI entrance with stagger
 			await tick();
 			loadingProgress.set(100);
 			
@@ -385,7 +535,6 @@
 	beforeUpdate(() => {
 		if (mounted) {
 			const endRender = perfMonitor.startRender('component-update');
-			// Will be called after update completes
 			tick().then(endRender);
 		}
 	});
@@ -409,7 +558,7 @@
 		// Start FPS tracking
 		requestAnimationFrame(trackFPS);
 		
-		// Enhanced event listeners with optimized options
+		// Enhanced event listeners
 		const eventOptions = { passive: true, capture: false };
 		const nonPassiveOptions = { passive: false, capture: false };
 		
@@ -420,13 +569,17 @@
 		window.addEventListener('click', updateInteraction, eventOptions);
 		window.addEventListener('wheel', updateInteraction, eventOptions);
 		document.addEventListener('visibilitychange', handleVisibilityChange, eventOptions);
+		
+		// 3D-specific event listeners
+		window.addEventListener('3d-performance-level-change', handle3DPerformanceLevelChange);
+		window.addEventListener('open-object-selector', handleObjectSelectorOpen);
 
 		// Initialize application
 		await initializeApp();
 
 		// Enable hot reload in development
 		if (import.meta.env.DEV) {
-			colorUtils.componentUtils.enableComponentHotReload();
+			componentUtils.enableComponentHotReload();
 		}
 	});
 
@@ -443,6 +596,13 @@
 		window.removeEventListener('click', updateInteraction);
 		window.removeEventListener('wheel', updateInteraction);
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
+		window.removeEventListener('3d-performance-level-change', handle3DPerformanceLevelChange);
+		window.removeEventListener('open-object-selector', handleObjectSelectorOpen);
+		
+		// Clean up 3D renderer
+		if (sharedThreeRenderer) {
+			sharedThreeRenderer.dispose();
+		}
 		
 		// Clean up performance monitoring
 		perfMonitor.reset();
@@ -459,12 +619,17 @@
 	class:setup-mode={!isSetupComplete}
 	class:settings-open={showSettings}
 	class:loading={isLoading}
-	class:high-performance={componentConfig.performanceMode === 'high'}
+	class:webgl-supported={webGLSupported}
+	class:three-d-enabled={threeDEnabled && webGLInitialized}
+	class:high-performance={componentConfig.performanceLevel === 'high'}
 	style="
 		--ui-opacity: {$uiOpacity}; 
 		--particle-scale: {$particleScale};
+		--three-d-scale: {$threeDTransition};
 		--loading-progress: {$loadingProgress}%;
 		--fps: {fps};
+		--object-count: {object3DCount};
+		--memory-usage: {memoryUsage};
 	"
 >
 	{#if isLoading}
@@ -479,14 +644,25 @@
 					></div>
 				</div>
 				<p class="text-secondary text-sm m-2">
-					{$loadingProgress < 30 ? 'Loading color system...' :
-					 $loadingProgress < 60 ? 'Initializing settings...' :
-					 $loadingProgress < 90 ? 'Loading wallpapers...' : 'Almost ready...'}
+					{$loadingProgress < 20 ? 'Loading color system...' :
+					 $loadingProgress < 35 ? 'Initializing 3D engine...' :
+					 $loadingProgress < 60 ? 'Loading settings...' :
+					 $loadingProgress < 80 ? 'Migrating to 3D objects...' :
+					 $loadingProgress < 95 ? 'Loading wallpapers...' : 'Almost ready...'}
 				</p>
+				{#if webGLError}
+					<p class="text-warning text-xs mt-2">
+						3D mode unavailable: {webGLError}
+					</p>
+				{/if}
 			</div>
 		</div>
 	{:else if loadingError}
-		<ErrorBoundary error={loadingError} onRetry={initializeApp} />
+		<ErrorBoundary 
+			error={loadingError} 
+			onRetry={initializeApp}
+			context="Application Initialization"
+		/>
 	{:else}
 		<!-- Background Layer -->
 		<Background
@@ -514,7 +690,7 @@
 			</div>
 		{/if}
 		
-		<!-- UI Layer -->
+		<!-- UI Layer with 3D Support -->
 		{#if isSetupComplete && isInitialized}
 			<div class="ui-layer animate-smooth" style="opacity: var(--ui-opacity)">
 				<div class="main-content">
@@ -536,13 +712,21 @@
 						config={componentConfig}
 						on:interact={updateInteraction}
 						on:bookmark-click={updateInteraction}
+						on:openSettings={(e) => {
+							if (e.detail.section === 'bookmarks') {
+								showSettings = true;
+								settingsOpacity.set(1);
+							}
+						}}
+						on:contextMenu={updateInteraction}
 					/>
 				</div>
 				
-				<!-- Enhanced Settings Toggle -->
+				<!-- Enhanced Settings Toggle with 3D Status -->
 				<button
 					class="settings-toggle glass hover-lift hover-glow animate-smooth"
 					class:active={showSettings}
+					class:three-d-active={threeDEnabled && webGLInitialized}
 					on:click={toggleSettings}
 					title="Settings ({settings.keyboard?.modifierKey || 'Ctrl'} + S)"
 					aria-label="Open settings panel"
@@ -555,14 +739,34 @@
 							<path d="m1 12 6 0m6 0 6 0"/>
 						</svg>
 					</div>
+					{#if threeDEnabled && webGLInitialized}
+						<div class="three-d-indicator"></div>
+					{/if}
 				</button>
 				
-				<!-- Performance indicator (dev mode) -->
+				<!-- 3D Performance Indicator (dev mode) -->
 				{#if import.meta.env.DEV && componentConfig.debugMode}
 					<div class="performance-indicator fixed top-4 left-4 text-xs text-tertiary">
-						<div>FPS: {fps}</div>
-						<div>Particles: {particleCount}</div>
-						<div>Mode: {componentConfig.performanceMode}</div>
+						<div class="perf-grid">
+							<span>FPS:</span><span>{fps}</span>
+							<span>Particles:</span><span>{particleCount}</span>
+							<span>3D Objects:</span><span>{object3DCount}</span>
+							<span>Memory:</span><span>{(memoryUsage / 1024 / 1024).toFixed(1)}MB</span>
+							<span>Mode:</span><span>{componentConfig.performanceLevel}</span>
+							<span>3D:</span><span class="three-d-status" class:enabled={threeDEnabled && webGLInitialized}>
+								{threeDEnabled && webGLInitialized ? 'ON' : 'OFF'}
+							</span>
+						</div>
+					</div>
+				{/if}
+				
+				<!-- 3D Migration Status (temporary) -->
+				{#if migration.hasLegacyIcons && !migration.migrationCompleted}
+					<div class="migration-indicator fixed bottom-4 left-4 glass text-xs text-info">
+						<div class="flex items-center gap-2">
+							<div class="migration-spinner animate-spin"></div>
+							<span>Migrating to 3D objects...</span>
+						</div>
 					</div>
 				{/if}
 			</div>
@@ -580,9 +784,13 @@
 						{settings}
 						wallpapers={$wallpaperStore}
 						config={componentConfig}
+						threeDStats={threeDStats}
+						webGLSupported={webGLSupported}
 						on:close={toggleSettings}
 						on:settingsUpdate={(e) => settingsStore.update(e.detail)}
 						on:font-size-change={(e) => updateFontSize(e.detail)}
+						on:toggle3D={toggle3DMode}
+						on:reinitialize3D={reinitializeThreeJS}
 					/>
 				</div>
 			{/if}
@@ -590,6 +798,7 @@
 			<!-- Setup Wizard -->
 			<SetupWizard
 				config={componentConfig}
+				webGLSupported={webGLSupported}
 				on:complete={() => setupStore.markComplete()}
 				on:skip={() => setupStore.markComplete()}
 			/>
@@ -612,9 +821,16 @@
 		filter: blur(1px) brightness(0.8);
 	}
 	
+	.start-page.three-d-enabled {
+		transform: translate3d(0, 0, 0);
+		backface-visibility: hidden;
+		perspective: 1000px;
+	}
+	
 	.start-page.high-performance {
 		transform: translate3d(0, 0, 0);
 		backface-visibility: hidden;
+		will-change: transform;
 	}
 	
 	.particle-container {
@@ -670,6 +886,7 @@
 		box-shadow: var(--shadow-lg);
 		border: 1px solid var(--glass-border-1);
 		transition: all var(--duration-normal) var(--easing-spring);
+		position: relative;
 	}
 	
 	.settings-toggle:hover {
@@ -689,12 +906,34 @@
 		box-shadow: var(--shadow-glow);
 	}
 	
+	.settings-toggle.three-d-active {
+		border-color: var(--color-vibrant);
+		box-shadow: var(--shadow-lg), 0 0 20px rgba(97, 218, 251, 0.3);
+	}
+	
 	.settings-icon {
 		transition: transform var(--duration-slow) var(--easing-spring);
 	}
 	
 	.settings-icon.spinning {
 		transform: rotate(180deg);
+	}
+	
+	.three-d-indicator {
+		position: absolute;
+		top: -2px;
+		right: -2px;
+		width: 8px;
+		height: 8px;
+		background: var(--color-vibrant);
+		border-radius: 50%;
+		box-shadow: 0 0 6px var(--color-vibrant);
+		animation: pulse-3d 2s ease-in-out infinite;
+	}
+	
+	@keyframes pulse-3d {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.6; transform: scale(1.2); }
 	}
 	
 	.settings-overlay {
@@ -726,7 +965,7 @@
 	}
 	
 	.loading-content {
-		max-width: 300px;
+		max-width: 320px;
 	}
 	
 	.loading-spinner {
@@ -763,6 +1002,36 @@
 		font-family: monospace;
 		pointer-events: none;
 		z-index: var(--z-tooltip);
+		min-width: 120px;
+	}
+	
+	.perf-grid {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: var(--space-1) var(--space-2);
+		font-size: 0.7rem;
+	}
+	
+	.three-d-status.enabled {
+		color: var(--color-vibrant);
+		font-weight: bold;
+	}
+	
+	.migration-indicator {
+		background: var(--glass-surface-2);
+		backdrop-filter: var(--blur-sm);
+		padding: var(--space-2) var(--space-3);
+		border-radius: var(--radius-md);
+		border: 1px solid var(--color-info);
+		z-index: var(--z-tooltip);
+	}
+	
+	.migration-spinner {
+		width: 12px;
+		height: 12px;
+		border: 1px solid var(--color-info);
+		border-top: 1px solid transparent;
+		border-radius: 50%;
 	}
 	
 	/* Animation utilities */
@@ -773,6 +1042,18 @@
 	
 	.animate-spin {
 		animation: spin 1s linear infinite;
+	}
+	
+	/* WebGL specific styles */
+	.webgl-supported {
+		/* Enhanced GPU acceleration */
+		transform: translate3d(0, 0, 0);
+		will-change: transform;
+	}
+	
+	.webgl-supported .gpu {
+		transform: translateZ(0);
+		backface-visibility: hidden;
 	}
 	
 	/* Responsive design */
@@ -787,6 +1068,11 @@
 			right: var(--space-4);
 			width: 2.25rem;
 			height: 2.25rem;
+		}
+		
+		.performance-indicator {
+			font-size: 0.6rem;
+			padding: var(--space-1);
 		}
 	}
 	
@@ -818,19 +1104,37 @@
 		.start-page.high-performance * {
 			animation-fill-mode: both;
 		}
+		
+		.three-d-enabled .animate-smooth {
+			transition-duration: 8ms;
+		}
 	}
 	
 	/* Reduced motion support */
 	@media (prefers-reduced-motion: reduce) {
 		.settings-icon,
 		.particle-container,
-		.loading-spinner {
+		.loading-spinner,
+		.migration-spinner,
+		.three-d-indicator {
 			animation: none !important;
 			transition: none !important;
 		}
 		
 		.settings-icon.spinning {
 			transform: rotate(45deg);
+		}
+	}
+	
+	/* Memory usage optimization */
+	@media (max-device-memory: 2GB) {
+		.start-page {
+			--particle-count-multiplier: 0.5;
+		}
+		
+		.three-d-enabled {
+			/* Reduce 3D quality on low memory devices */
+			--object-lod-distance: 3;
 		}
 	}
 </style>
