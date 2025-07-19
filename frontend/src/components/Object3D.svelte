@@ -13,7 +13,7 @@
 		WebGLContextManager,
 		ComponentPerformanceMonitor
 	} from '$lib/objects3d';
-	import { objects3DSettings } from '$stores/settings';
+	import { settings } from '$stores/settings';
 	import { colorStore } from '$stores/color';
 	import { ThreeRenderer } from '$lib/three-renderer';
 	
@@ -58,6 +58,7 @@
 	let dedicatedRenderer: THREE.WebGLRenderer | null = null;
 	let scene: THREE.Scene | null = null;
 	let camera: THREE.PerspectiveCamera | null = null;
+	let resizeObserver: ResizeObserver | null = null;
 	
 	// 3D object state
 	let objectInstance: Object3DInstance | null = null;
@@ -66,19 +67,20 @@
 	let hasError = false;
 	let isHovered = false;
 	let lastFrameTime = 0;
+	let animationFrameId = 0;
 	
 	// Context
 	$: sharedRenderer = getContext('threeRenderer') || null;
 	$: webGLSupported = getContext('webGLSupported') !== false;
 	
 	// Reactive values
-	$: settings = get(objects3DSettings);
+	$: currentSettings = get(settings);
 	$: colorPalette = get(colorStore);
 	$: currentDominantColor = dominantColor || colorPalette.current || '#4a90e2';
 	$: effectiveObjectId = objectId || config?.id || bookmarkCategory?.objectId || '';
-	$: effectiveScale = scale * (settings.globalScale || 1.0);
-	$: shouldAnimate = enableAnimation && settings.enableAnimations && !staticPreview;
-	$: effectiveAnimationSpeed = animationSpeed * (settings.animationSpeed || 1.0);
+	$: effectiveScale = scale * (currentSettings.globalScale || 1.0);
+	$: shouldAnimate = enableAnimation && currentSettings.enableAnimations && !staticPreview;
+	$: effectiveAnimationSpeed = animationSpeed * (currentSettings.animationSpeed || 1.0);
 	
 	// ===== LIFECYCLE =====
 	
@@ -92,7 +94,7 @@
 			await initializeComponent();
 		} catch (error) {
 			console.error('Object3D initialization failed:', error);
-			handleError(error.message);
+			handleError(error instanceof Error ? error.message : 'Unknown error');
 		}
 	});
 	
@@ -106,6 +108,11 @@
 		const endPerformanceTracking = performanceMonitor.startRender('Object3D');
 		
 		try {
+			// Validate required props
+			if (!effectiveObjectId) {
+				throw new Error('No object ID provided');
+			}
+			
 			// Load object configuration
 			await loadObjectConfig();
 			
@@ -129,7 +136,7 @@
 			
 		} catch (error) {
 			console.error('Component initialization failed:', error);
-			await handleError(error.message);
+			await handleError(error instanceof Error ? error.message : 'Unknown error');
 		} finally {
 			endPerformanceTracking();
 		}
@@ -192,7 +199,7 @@
 		
 		const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
 		directionalLight.position.set(5, 5, 5);
-		if (settings.enableShadows && enableShadows) {
+		if (currentSettings.enableShadows && enableShadows) {
 			directionalLight.castShadow = true;
 			directionalLight.shadow.mapSize.setScalar(1024);
 		}
@@ -202,17 +209,17 @@
 		dedicatedRenderer = new THREE.WebGLRenderer({ 
 			canvas: canvasElement,
 			alpha: true,
-			antialias: settings.antiAliasing !== false,
-			powerPreference: settings.performanceMode === 'high' ? 'high-performance' : 'default'
+			antialias: currentSettings.antiAliasing !== false,
+			powerPreference: currentSettings.performanceMode === 'high' ? 'high-performance' : 'default'
 		});
 		
 		dedicatedRenderer.setSize(canvasElement.clientWidth, canvasElement.clientHeight);
-		dedicatedRenderer.setPixelRatio(Math.min(window.devicePixelRatio, settings.renderResolution || 1));
-		dedicatedRenderer.shadowMap.enabled = settings.enableShadows && enableShadows;
+		dedicatedRenderer.setPixelRatio(Math.min(window.devicePixelRatio, currentSettings.renderResolution || 1));
+		dedicatedRenderer.shadowMap.enabled = currentSettings.enableShadows && enableShadows;
 		dedicatedRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
 		
 		// Handle resize
-		const resizeObserver = new ResizeObserver(() => {
+		resizeObserver = new ResizeObserver(() => {
 			if (dedicatedRenderer && camera && canvasElement) {
 				const width = canvasElement.clientWidth;
 				const height = canvasElement.clientHeight;
@@ -234,7 +241,7 @@
 			// Create instance using registry
 			objectInstance = await Object3DRegistry.createInstance(
 				objectConfig.id, 
-				colorPalette.palette
+				colorPalette
 			);
 			
 			if (!objectInstance) {
@@ -248,7 +255,7 @@
 			if (currentDominantColor) {
 				ColorAdapter.adaptMaterial(
 					objectInstance.mesh.material,
-					{ ...colorPalette.palette, dominant: currentDominantColor },
+					{ ...colorPalette, dominant: currentDominantColor },
 					objectConfig.colorAdaptation
 				);
 			}
@@ -303,6 +310,9 @@
 			// Apply any additional customizations passed as props
 			Object.entries(customization).forEach(([key, value]) => {
 				// Apply based on key type
+				if (key === 'scale' && typeof value === 'number' && objectInstance) {
+					objectInstance.mesh.scale.multiplyScalar(value);
+				}
 			});
 		}
 	}
@@ -319,33 +329,33 @@
 			const deltaTime = (time - lastFrameTime) / 1000;
 			lastFrameTime = time;
 			
-			if (shouldAnimate) {
+			if (shouldAnimate && objectInstance) {
 				AnimationSystem.update(deltaTime);
-			}
-			
-			// Update object state
-			if (objectInstance) {
+				
+				// Update object state
 				objectInstance.state.isHovered = isHovered;
 				objectInstance.state.isIdle = !isActive && !isHovered;
 			}
 			
 			// Render
-			dedicatedRenderer.render(scene, camera);
+			try {
+				dedicatedRenderer.render(scene, camera);
+			} catch (error) {
+				console.warn('Render error:', error);
+			}
 			
 			// Performance tracking
 			if (objectInstance) {
-				performanceMonitor.record3DMetrics(
+				performanceMonitor.recordRenderTime(
 					objectInstance.id,
-					deltaTime * 1000,
-					0, // Memory usage - would need to calculate
-					1  // Draw calls - simplified
+					deltaTime * 1000
 				);
 			}
 			
-			requestAnimationFrame(animate);
+			animationFrameId = requestAnimationFrame(animate);
 		};
 		
-		requestAnimationFrame(animate);
+		animationFrameId = requestAnimationFrame(animate);
 	}
 	
 	// ===== EVENT HANDLERS =====
@@ -366,7 +376,7 @@
 	function handleMouseEnter(event: MouseEvent): void {
 		isHovered = true;
 		
-		if (objectInstance && settings.interaction.enableHover) {
+		if (objectInstance && currentSettings.enableHoverEffects) {
 			// Trigger hover animation
 			AnimationSystem.createHoverAnimation(objectInstance);
 		}
@@ -417,7 +427,7 @@
 			category: bookmarkCategory
 		});
 		
-		// Try to load fallback object
+		// Try to load fallback object if not already using fallback
 		if (!objectConfig || objectConfig.id !== 'geometric/sphere') {
 			try {
 				objectConfig = Object3DRegistry.getObject('geometric/sphere');
@@ -439,7 +449,7 @@
 		try {
 			// Update scale
 			if (newSettings.globalScale !== undefined) {
-				objectInstance.mesh.scale.setScalar(newSettings.globalScale);
+				objectInstance.mesh.scale.setScalar(newSettings.globalScale * scale);
 			}
 			
 			// Update animations
@@ -475,12 +485,19 @@
 	}
 	
 	export function getPerformanceMetrics() {
-		return performanceMonitor.get3DMetrics(objectInstance?.id);
+		if (!objectInstance) return null;
+		return performanceMonitor.getMetrics(objectInstance.id);
 	}
 	
 	// ===== CLEANUP =====
 	
 	function cleanup(): void {
+		// Stop animation loop
+		if (animationFrameId) {
+			cancelAnimationFrame(animationFrameId);
+			animationFrameId = 0;
+		}
+		
 		// Dispose animations
 		if (objectInstance) {
 			AnimationSystem.dispose(objectInstance.id);
@@ -498,6 +515,12 @@
 			dedicatedRenderer = null;
 		}
 		
+		// Disconnect resize observer
+		if (resizeObserver) {
+			resizeObserver.disconnect();
+			resizeObserver = null;
+		}
+		
 		// Clear references
 		scene = null;
 		camera = null;
@@ -510,7 +533,7 @@
 		// Update colors when wallpaper changes
 		ColorAdapter.adaptMaterial(
 			objectInstance.mesh.material,
-			{ ...colorPalette.palette, dominant: currentDominantColor },
+			{ ...colorPalette, dominant: currentDominantColor },
 			objectConfig?.colorAdaptation || {
 				mode: 'auto',
 				intensity: 1,
@@ -528,10 +551,11 @@
 		objectInstance.mesh.scale.setScalar(effectiveScale);
 	}
 	
-	$: if (isInitialized && isActive !== objectInstance?.state.isIdle) {
+	$: if (isInitialized && isActive !== objectInstance?.state.isActive) {
 		// Update active state
 		if (objectInstance) {
-			objectInstance.state.isIdle = !isActive;
+			objectInstance.state.isActive = isActive;
+			objectInstance.state.isIdle = !isActive && !isHovered;
 		}
 	}
 </script>
@@ -556,11 +580,25 @@
 	>
 		{#if hasError && fallbackTo2D}
 			<!-- 2D fallback for bookmark mode -->
-			<div class="fallback-icon">
-				{bookmarkCategory?.iconId ? 
-					(bookmarkCategory.iconId.includes('/') ? 
-						bookmarkCategory.iconId.split('/')[1] : '📁') 
-					: '📁'}
+			<div class="fallback-icon" style="color: {currentDominantColor};">
+				{#if bookmarkCategory?.objectId}
+					{@const iconMap = {
+						'development/computer': '💻',
+						'development/git-tree': '🌳',
+						'development/coffee': '☕',
+						'learning/graduation-cap': '🎓',
+						'learning/textbooks': '📚',
+						'learning/brain': '🧠',
+						'creative/dice': '🎲',
+						'creative/treasure-chest': '💰',
+						'geometric/diamond': '💎',
+						'geometric/sphere': '⚪',
+						'geometric/octahedron': '🔷'
+					}}
+					{iconMap[bookmarkCategory.objectId] || '📁'}
+				{:else}
+					📁
+				{/if}
 			</div>
 		{/if}
 	</div>
@@ -579,7 +617,31 @@
 			style="width: 100%; height: 100%;"
 		></canvas>
 		
-		{#if hasError}
+		{#if hasError && fallbackTo2D}
+			<div class="error-overlay">
+				<div class="fallback-icon-large" style="color: {currentDominantColor};">
+					{#if effectiveObjectId}
+						{@const iconMap = {
+							'development/computer': '💻',
+							'development/git-tree': '🌳',
+							'development/coffee': '☕',
+							'learning/graduation-cap': '🎓',
+							'learning/textbooks': '📚',
+							'learning/brain': '🧠',
+							'creative/dice': '🎲',
+							'creative/treasure-chest': '💰',
+							'geometric/diamond': '💎',
+							'geometric/sphere': '⚪',
+							'geometric/octahedron': '🔷'
+						}}
+						{iconMap[effectiveObjectId] || '📦'}
+					{:else}
+						📦
+					{/if}
+				</div>
+				<span class="error-text">Using 2D fallback</span>
+			</div>
+		{:else if hasError}
 			<div class="error-overlay">
 				<span class="error-icon">⚠️</span>
 				<span class="error-text">Failed to load 3D object</span>
@@ -626,6 +688,11 @@
 		font-size: calc(var(--object-size, 80px) * 0.4);
 		opacity: 0.8;
 		filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+		transition: transform 0.3s ease;
+	}
+	
+	.object-3d-bookmark:hover .fallback-icon {
+		transform: scale(1.2) rotate(10deg);
 	}
 	
 	.object-3d-preview {
@@ -683,9 +750,17 @@
 		font-size: 1.5rem;
 	}
 	
+	.fallback-icon-large {
+		font-size: 3rem;
+		opacity: 0.9;
+		filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.5));
+		margin-bottom: 0.5rem;
+	}
+	
 	.error-text {
 		text-align: center;
 		opacity: 0.9;
+		font-size: 0.75rem;
 	}
 	
 	.loading-spinner {
@@ -717,11 +792,16 @@
 			min-width: 150px;
 			min-height: 150px;
 		}
+		
+		.fallback-icon-large {
+			font-size: 2.5rem;
+		}
 	}
 	
 	/* Performance optimizations */
 	@media (prefers-reduced-motion: reduce) {
-		.object-3d-bookmark {
+		.object-3d-bookmark,
+		.fallback-icon {
 			transition: none;
 		}
 		
@@ -730,8 +810,29 @@
 			transform: none;
 		}
 		
+		.object-3d-bookmark:hover .fallback-icon {
+			transform: none;
+		}
+		
 		.loading-spinner {
 			animation: none;
+		}
+	}
+	
+	/* Accessibility improvements */
+	.object-3d-bookmark:focus-visible {
+		outline: 2px solid currentColor;
+		outline-offset: 2px;
+	}
+	
+	@media (forced-colors: active) {
+		.object-3d-bookmark.error {
+			border-color: Highlight;
+		}
+		
+		.error-overlay {
+			background: Canvas;
+			color: CanvasText;
 		}
 	}
 </style>
