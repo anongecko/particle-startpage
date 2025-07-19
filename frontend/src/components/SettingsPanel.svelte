@@ -2,13 +2,16 @@
 	import { onMount, onDestroy, createEventDispatcher, tick } from 'svelte';
 	import { browser } from '$app/environment';
 	import { tweened, spring } from 'svelte/motion';
-	import { cubicOut, elasticOut } from 'svelte/easing';
+	import { cubicOut, elasticOut, quintOut } from 'svelte/easing';
 	import { settingsStore } from '$stores/settings';
 	import { wallpaperStore } from '$stores/wallpaper';
 	import { bookmarkStore } from '$stores/bookmarks';
 	import { colorStore } from '$stores/color';
+	import { object3DAnalytics } from '$stores/bookmarks';
 	import { settingsAPI } from '$lib/api';
 	import { debounce, formatFileSize, PerformanceMonitor } from '$lib/utils';
+	import { getAllObjects, getObjectsByCategory, OBJECT_CATEGORIES } from '$lib/objects';
+	import Object3D from './Object3D.svelte';
 	
 	export let settings: any;
 	export let wallpapers: any;
@@ -20,21 +23,28 @@
 	let showResetConfirm = false;
 	let showImportDialog = false;
 	let importData = '';
-	let performanceStats = { fps: 60, memory: 0, particles: 0 };
+	let performanceStats = { fps: 60, memory: 0, particles: 0, objects3D: 0 };
 	let isExporting = false;
 	let searchQuery = '';
 	let fileInput: HTMLInputElement;
+	let webGLSupported = true;
+	let selectedObject3D = null;
+	let object3DPreviewRef = null;
+	let objectBrowserCategory = 'all';
+	let threeDPerformanceMode = 'high';
 	
 	const modalScale = spring(0.8, { stiffness: 0.3, damping: 0.8 });
 	const modalOpacity = tweened(0, { duration: 300, easing: cubicOut });
 	const backdropBlur = tweened(0, { duration: 400, easing: cubicOut });
 	const tabSlideOffset = tweened(0, { duration: 250, easing: cubicOut });
+	const previewScale = spring(1, { stiffness: 0.2, damping: 0.8 });
 	
 	const tabs = [
 		{ id: 'general', label: 'General', icon: '⚙️' },
 		{ id: 'wallpaper', label: 'Wallpaper', icon: '🖼️' },
 		{ id: 'particles', label: 'Particles', icon: '✨' },
 		{ id: 'bookmarks', label: 'Bookmarks', icon: '📚' },
+		{ id: 'objects3d', label: '3D Objects', icon: '🎯' },
 		{ id: 'appearance', label: 'Appearance', icon: '🎨' },
 		{ id: 'performance', label: 'Performance', icon: '⚡' },
 		{ id: 'keyboard', label: 'Shortcuts', icon: '⌨️' },
@@ -42,6 +52,8 @@
 	];
 	
 	let performanceMonitor: PerformanceMonitor;
+	let availableObjects = [];
+	let filteredObjects = [];
 	
 	$: filteredTabs = searchQuery 
 		? tabs.filter(tab => tab.label.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -49,7 +61,23 @@
 	
 	$: if (browser) {
 		updatePerformanceStats();
+		loadAvailableObjects();
 	}
+	
+	$: if (objectBrowserCategory && availableObjects.length > 0) {
+		updateFilteredObjects();
+	}
+	
+	$: threeDSettings = settings?.objects3d || {
+		enabled: true,
+		performanceMode: 'high',
+		enableAnimations: true,
+		enableGlow: true,
+		enableShadows: true,
+		globalScale: 1.0,
+		animationSpeed: 1.0,
+		autoMigration: true
+	};
 	
 	const debouncedSettingsUpdate = debounce((newSettings: any) => {
 		settingsStore.update(newSettings);
@@ -68,6 +96,11 @@
 		
 		current[keys[keys.length - 1]] = value;
 		debouncedSettingsUpdate(newSettings);
+		
+		// Trigger real-time preview for 3D settings
+		if (path.startsWith('objects3d.')) {
+			triggerPreviewUpdate();
+		}
 	}
 	
 	function updatePerformanceStats() {
@@ -76,7 +109,8 @@
 		performanceStats = {
 			fps: Math.round(performanceMonitor.getAverage('frame') || 60),
 			memory: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1024 / 1024) : 0,
-			particles: wallpapers?.particleCount || 0
+			particles: wallpapers?.particleCount || 0,
+			objects3D: $object3DAnalytics?.activeObjects || 0
 		};
 	}
 	
@@ -85,27 +119,127 @@
 		const newIndex = tabs.findIndex(t => t.id === tabId);
 		const direction = newIndex > currentIndex ? 1 : -1;
 		
-		tabSlideOffset.set(direction * 20).then(() => {
+		tabSlideOffset.set(direction * 100);
+		
+		setTimeout(() => {
 			activeTab = tabId;
-			tabSlideOffset.set(0);
-		});
+			tabSlideOffset.set(-direction * 100);
+			
+			setTimeout(() => {
+				tabSlideOffset.set(0);
+			}, 50);
+		}, 125);
+	}
+	
+	function checkWebGLSupport() {
+		try {
+			const canvas = document.createElement('canvas');
+			const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+			webGLSupported = !!gl;
+			
+			if (gl) {
+				const ext = gl.getExtension('WEBGL_debug_renderer_info');
+				const renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'Unknown';
+				console.log('WebGL Renderer:', renderer);
+			}
+		} catch (e) {
+			webGLSupported = false;
+		}
+	}
+	
+	function loadAvailableObjects() {
+		availableObjects = getAllObjects();
+		updateFilteredObjects();
+	}
+	
+	function updateFilteredObjects() {
+		if (objectBrowserCategory === 'all') {
+			filteredObjects = availableObjects;
+		} else {
+			filteredObjects = getObjectsByCategory(objectBrowserCategory);
+		}
+	}
+	
+	function selectObject(objectConfig: any) {
+		selectedObject3D = objectConfig;
+		previewScale.set(1.1);
+		setTimeout(() => previewScale.set(1), 200);
+		
+		// Update preview
+		triggerPreviewUpdate();
+	}
+	
+	function triggerPreviewUpdate() {
+		if (object3DPreviewRef) {
+			object3DPreviewRef.updateConfiguration(threeDSettings);
+		}
+	}
+	
+	function apply3DPerformancePreset(preset: string) {
+		threeDPerformanceMode = preset;
+		
+		const presets = {
+			low: {
+				enableAnimations: false,
+				enableGlow: false,
+				enableShadows: false,
+				globalScale: 0.8,
+				animationSpeed: 0.5
+			},
+			medium: {
+				enableAnimations: true,
+				enableGlow: false,
+				enableShadows: false,
+				globalScale: 0.9,
+				animationSpeed: 0.8
+			},
+			high: {
+				enableAnimations: true,
+				enableGlow: true,
+				enableShadows: true,
+				globalScale: 1.0,
+				animationSpeed: 1.0
+			},
+			ultra: {
+				enableAnimations: true,
+				enableGlow: true,
+				enableShadows: true,
+				globalScale: 1.2,
+				animationSpeed: 1.5
+			}
+		};
+		
+		const presetConfig = presets[preset];
+		if (presetConfig) {
+			Object.entries(presetConfig).forEach(([key, value]) => {
+				updateSetting(`objects3d.${key}`, value);
+			});
+		}
 	}
 	
 	async function exportSettings() {
 		isExporting = true;
 		try {
-			const response = await settingsAPI.exportSettings();
-			if (response.success) {
-				const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' });
-				const url = URL.createObjectURL(blob);
-				const a = document.createElement('a');
-				a.href = url;
-				a.download = `startpage-settings-${new Date().toISOString().split('T')[0]}.json`;
-				a.click();
-				URL.revokeObjectURL(url);
-			}
-		} catch (error) {
-			console.error('Export failed:', error);
+			const exportData = {
+				version: '2.0.0',
+				settings,
+				wallpapers: $wallpaperStore,
+				bookmarks: $bookmarkStore,
+				exportedAt: Date.now(),
+				includes3D: true
+			};
+			
+			const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+				type: 'application/json'
+			});
+			
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = `startpage-settings-${new Date().toISOString().split('T')[0]}.json`;
+			link.click();
+			
+			URL.revokeObjectURL(url);
 		} finally {
 			isExporting = false;
 		}
@@ -117,102 +251,88 @@
 		
 		const reader = new FileReader();
 		reader.onload = (e) => {
-			importData = e.target?.result as string;
-			showImportDialog = true;
+			try {
+				importData = e.target?.result as string;
+				showImportDialog = true;
+			} catch (error) {
+				console.error('Failed to read import file:', error);
+			}
 		};
 		reader.readAsText(file);
 	}
 	
-	async function importSettings() {
+	function importSettings() {
 		try {
-			const parsed = JSON.parse(importData);
-			await settingsAPI.importSettings(parsed);
-			settingsStore.set(parsed);
-			dispatch('settingsUpdate', parsed);
+			const data = JSON.parse(importData);
+			if (data.settings) {
+				settingsStore.set(data.settings);
+			}
 			showImportDialog = false;
 			importData = '';
 		} catch (error) {
-			console.error('Import failed:', error);
+			console.error('Failed to import settings:', error);
 		}
 	}
 	
-	async function resetToDefaults() {
-		try {
-			await settingsStore.reset();
-			showResetConfirm = false;
-			dispatch('settingsUpdate', settingsStore.getDefaults());
-		} catch (error) {
-			console.error('Reset failed:', error);
-		}
+	function resetToDefaults() {
+		settingsStore.reset();
+		showResetConfirm = false;
 	}
 	
-	function handleKeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape') {
-			closePanel();
-		} else if (event.key === 'Tab') {
-			const currentIndex = tabs.findIndex(t => t.id === activeTab);
-			const nextIndex = event.shiftKey 
-				? (currentIndex - 1 + tabs.length) % tabs.length
-				: (currentIndex + 1) % tabs.length;
-			switchTab(tabs[nextIndex].id);
-			event.preventDefault();
-		}
-	}
-	
-	function closePanel() {
-		modalScale.set(0.8);
-		modalOpacity.set(0);
-		backdropBlur.set(0);
-		setTimeout(() => dispatch('close'), 300);
-	}
-	
-	onMount(() => {
-		performanceMonitor = new PerformanceMonitor();
+	onMount(async () => {
 		modalScale.set(1);
 		modalOpacity.set(1);
-		backdropBlur.set(1);
+		backdropBlur.set(10);
 		
-		if (panelElement) {
-			panelElement.focus();
+		checkWebGLSupport();
+		
+		if (browser) {
+			performanceMonitor = new PerformanceMonitor();
+			performanceMonitor.start();
 		}
+		
+		document.body.style.overflow = 'hidden';
+		
+		return () => {
+			document.body.style.overflow = '';
+		};
+	});
+	
+	onDestroy(() => {
+		if (performanceMonitor) {
+			performanceMonitor.stop();
+		}
+		document.body.style.overflow = '';
 	});
 </script>
 
 <div 
 	class="settings-modal" 
-	style="backdrop-filter: blur({$backdropBlur * 12}px); opacity: {$modalOpacity}"
-	on:click={closePanel}
-	on:keydown={handleKeydown}
-	role="dialog" 
-	aria-modal="true"
-	aria-labelledby="settings-title"
-	tabindex="-1"
+	style="backdrop-filter: blur({$backdropBlur}px)"
+	on:click={() => dispatch('close')}
 >
 	<div 
-		class="settings-panel" 
-		bind:this={panelElement}
-		style="transform: scale({$modalScale}); transform-origin: center"
+		class="settings-panel"
+		style="transform: scale({$modalScale}); opacity: {$modalOpacity}"
 		on:click|stopPropagation
+		bind:this={panelElement}
 	>
-		<header class="panel-header">
+		<div class="panel-header">
 			<div class="header-content">
-				<h1 id="settings-title">Settings</h1>
-				<div class="header-search">
-					<input 
-						type="text" 
-						placeholder="Search settings..." 
-						bind:value={searchQuery}
-						class="search-input"
-					/>
-				</div>
+				<h1>Settings</h1>
+				<input 
+					type="text" 
+					placeholder="Search settings..." 
+					class="search-input"
+					bind:value={searchQuery}
+				/>
 			</div>
-			<button class="close-button" on:click={closePanel} aria-label="Close settings">
+			<button class="close-button" on:click={() => dispatch('close')}>
 				<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<line x1="18" y1="6" x2="6" y2="18"/>
-					<line x1="6" y1="6" x2="18" y2="18"/>
+					<path d="m6 6 12 12M6 18 18 6"/>
 				</svg>
 			</button>
-		</header>
+		</div>
 		
 		<div class="panel-body">
 			<nav class="settings-nav">
@@ -223,7 +343,7 @@
 						on:click={() => switchTab(tab.id)}
 					>
 						<span class="tab-icon">{tab.icon}</span>
-						<span class="tab-label">{tab.label}</span>
+						{tab.label}
 					</button>
 				{/each}
 			</nav>
@@ -232,37 +352,24 @@
 				{#if activeTab === 'general'}
 					<div class="settings-section">
 						<div class="section-card">
-							<h3>General Preferences</h3>
+							<h3>General Settings</h3>
 							<div class="setting-row">
 								<label>
-									<span>Auto-hide UI after inactivity</span>
+									<span>Show welcome message on startup</span>
 									<input 
 										type="checkbox" 
-										checked={settings?.ui?.autoHide || false}
-										on:change={(e) => updateSetting('ui.autoHide', e.target.checked)}
+										checked={settings?.general?.showWelcome !== false}
+										on:change={(e) => updateSetting('general.showWelcome', e.target.checked)}
 									/>
 								</label>
 							</div>
 							<div class="setting-row">
 								<label>
-									<span>Hide timeout (seconds)</span>
-									<input 
-										type="range" 
-										min="5" 
-										max="60" 
-										value={settings?.ui?.autoHideTimeout || 15}
-										on:input={(e) => updateSetting('ui.autoHideTimeout', parseInt(e.target.value))}
-									/>
-									<span class="range-value">{settings?.ui?.autoHideTimeout || 15}s</span>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>High contrast mode</span>
+									<span>Auto-save settings</span>
 									<input 
 										type="checkbox" 
-										checked={settings?.ui?.highContrast || false}
-										on:change={(e) => updateSetting('ui.highContrast', e.target.checked)}
+										checked={settings?.general?.autoSave !== false}
+										on:change={(e) => updateSetting('general.autoSave', e.target.checked)}
 									/>
 								</label>
 							</div>
@@ -274,49 +381,25 @@
 							<h3>Wallpaper Settings</h3>
 							<div class="setting-row">
 								<label>
-									<span>Auto-transition wallpapers</span>
+									<span>Auto-cycle wallpapers</span>
 									<input 
 										type="checkbox" 
-										checked={wallpapers?.autoTransition || false}
-										on:change={(e) => wallpaperStore.setAutoTransition(e.target.checked)}
+										checked={settings?.wallpaper?.autoCycle !== false}
+										on:change={(e) => updateSetting('wallpaper.autoCycle', e.target.checked)}
 									/>
 								</label>
 							</div>
 							<div class="setting-row">
 								<label>
-									<span>Transition interval (seconds)</span>
+									<span>Cycle interval (minutes)</span>
 									<input 
 										type="range" 
-										min="10" 
-										max="300" 
-										value={wallpapers?.cycleDuration ? wallpapers.cycleDuration / 1000 : 30}
-										on:input={(e) => wallpaperStore.setCycleDuration(parseInt(e.target.value) * 1000)}
+										min="1" 
+										max="60" 
+										value={settings?.wallpaper?.cycleInterval || 10}
+										on:input={(e) => updateSetting('wallpaper.cycleInterval', parseInt(e.target.value))}
 									/>
-									<span class="range-value">{wallpapers?.cycleDuration ? Math.floor(wallpapers.cycleDuration / 1000) : 30}s</span>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>Transition effect</span>
-									<select 
-										value={wallpapers?.transitionType || 'fade'}
-										on:change={(e) => wallpaperStore.setTransitionType(e.target.value)}
-									>
-										<option value="fade">Fade</option>
-										<option value="slide">Slide</option>
-										<option value="zoom">Zoom</option>
-										<option value="blur">Blur</option>
-									</select>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>Enable special effects</span>
-									<input 
-										type="checkbox" 
-										checked={wallpapers?.enableSpecialEffects || false}
-										on:change={(e) => wallpaperStore.setSpecialEffects(e.target.checked)}
-									/>
+									<span class="range-value">{settings?.wallpaper?.cycleInterval || 10}m</span>
 								</label>
 							</div>
 						</div>
@@ -340,38 +423,25 @@
 									<span>Particle count</span>
 									<input 
 										type="range" 
-										min="25" 
+										min="10" 
 										max="200" 
-										value={settings?.particles?.count || 75}
+										value={settings?.particles?.count || 80}
 										on:input={(e) => updateSetting('particles.count', parseInt(e.target.value))}
 									/>
-									<span class="range-value">{settings?.particles?.count || 75}</span>
+									<span class="range-value">{settings?.particles?.count || 80}</span>
 								</label>
 							</div>
 							<div class="setting-row">
 								<label>
-									<span>Mouse interaction strength</span>
+									<span>Connection distance</span>
 									<input 
 										type="range" 
-										min="0" 
-										max="100" 
-										value={settings?.particles?.mouseInfluence || 50}
-										on:input={(e) => updateSetting('particles.mouseInfluence', parseInt(e.target.value))}
+										min="50" 
+										max="200" 
+										value={settings?.particles?.connectionDistance || 120}
+										on:input={(e) => updateSetting('particles.connectionDistance', parseInt(e.target.value))}
 									/>
-									<span class="range-value">{settings?.particles?.mouseInfluence || 50}%</span>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>Movement speed</span>
-									<input 
-										type="range" 
-										min="10" 
-										max="100" 
-										value={settings?.particles?.speed || 50}
-										on:input={(e) => updateSetting('particles.speed', parseInt(e.target.value))}
-									/>
-									<span class="range-value">{settings?.particles?.speed || 50}%</span>
+									<span class="range-value">{settings?.particles?.connectionDistance || 120}px</span>
 								</label>
 							</div>
 						</div>
@@ -382,38 +452,193 @@
 							<h3>Bookmark Management</h3>
 							<div class="setting-row">
 								<label>
-									<span>Show bookmark previews</span>
+									<span>Auto-detect favicons</span>
 									<input 
 										type="checkbox" 
-										checked={settings?.bookmarks?.showPreviews !== false}
-										on:change={(e) => updateSetting('bookmarks.showPreviews', e.target.checked)}
+										checked={settings?.bookmarks?.autoFavicon !== false}
+										on:change={(e) => updateSetting('bookmarks.autoFavicon', e.target.checked)}
 									/>
 								</label>
 							</div>
 							<div class="setting-row">
 								<label>
-									<span>Animation intensity</span>
-									<input 
-										type="range" 
-										min="0" 
-										max="100" 
-										value={settings?.bookmarks?.animationIntensity || 75}
-										on:input={(e) => updateSetting('bookmarks.animationIntensity', parseInt(e.target.value))}
-									/>
-									<span class="range-value">{settings?.bookmarks?.animationIntensity || 75}%</span>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>Auto-organize folders</span>
+									<span>Show bookmark descriptions</span>
 									<input 
 										type="checkbox" 
-										checked={settings?.bookmarks?.autoOrganize || false}
-										on:change={(e) => updateSetting('bookmarks.autoOrganize', e.target.checked)}
+										checked={settings?.bookmarks?.showDescriptions !== false}
+										on:change={(e) => updateSetting('bookmarks.showDescriptions', e.target.checked)}
 									/>
 								</label>
 							</div>
 						</div>
+					</div>
+				{:else if activeTab === 'objects3d'}
+					<div class="settings-section">
+						{#if !webGLSupported}
+							<div class="section-card warning">
+								<h3>⚠️ WebGL Not Supported</h3>
+								<p>Your browser doesn't support WebGL, which is required for 3D objects. The page will automatically fall back to 2D icons.</p>
+								<div class="webgl-info">
+									<button class="action-button" on:click={checkWebGLSupport}>
+										Recheck WebGL Support
+									</button>
+								</div>
+							</div>
+						{/if}
+						
+						<div class="section-card">
+							<h3>3D Object Settings</h3>
+							<div class="setting-row">
+								<label>
+									<span>Enable 3D objects</span>
+									<input 
+										type="checkbox" 
+										checked={threeDSettings.enabled}
+										disabled={!webGLSupported}
+										on:change={(e) => updateSetting('objects3d.enabled', e.target.checked)}
+									/>
+								</label>
+							</div>
+							
+							<div class="setting-group">
+								<h4>Performance Preset</h4>
+								<div class="preset-buttons">
+									{#each ['low', 'medium', 'high', 'ultra'] as preset}
+										<button 
+											class="preset-button"
+											class:active={threeDPerformanceMode === preset}
+											disabled={!threeDSettings.enabled}
+											on:click={() => apply3DPerformancePreset(preset)}
+										>
+											{preset.charAt(0).toUpperCase() + preset.slice(1)}
+										</button>
+									{/each}
+								</div>
+							</div>
+							
+							{#if threeDSettings.enabled}
+								<div class="setting-row">
+									<label>
+										<span>Global scale</span>
+										<input 
+											type="range" 
+											min="0.5" 
+											max="2.0" 
+											step="0.1"
+											value={threeDSettings.globalScale}
+											on:input={(e) => updateSetting('objects3d.globalScale', parseFloat(e.target.value))}
+										/>
+										<span class="range-value">{threeDSettings.globalScale}×</span>
+									</label>
+								</div>
+								
+								<div class="setting-row">
+									<label>
+										<span>Animation speed</span>
+										<input 
+											type="range" 
+											min="0.2" 
+											max="3.0" 
+											step="0.1"
+											value={threeDSettings.animationSpeed}
+											on:input={(e) => updateSetting('objects3d.animationSpeed', parseFloat(e.target.value))}
+										/>
+										<span class="range-value">{threeDSettings.animationSpeed}×</span>
+									</label>
+								</div>
+								
+								<div class="setting-row">
+									<label>
+										<span>Enable animations</span>
+										<input 
+											type="checkbox" 
+											checked={threeDSettings.enableAnimations}
+											on:change={(e) => updateSetting('objects3d.enableAnimations', e.target.checked)}
+										/>
+									</label>
+								</div>
+								
+								<div class="setting-row">
+									<label>
+										<span>Enable glow effects</span>
+										<input 
+											type="checkbox" 
+											checked={threeDSettings.enableGlow}
+											on:change={(e) => updateSetting('objects3d.enableGlow', e.target.checked)}
+										/>
+									</label>
+								</div>
+								
+								<div class="setting-row">
+									<label>
+										<span>Enable shadows</span>
+										<input 
+											type="checkbox" 
+											checked={threeDSettings.enableShadows}
+											on:change={(e) => updateSetting('objects3d.enableShadows', e.target.checked)}
+										/>
+									</label>
+								</div>
+							{/if}
+						</div>
+						
+						{#if threeDSettings.enabled}
+							<div class="section-card">
+								<h3>Object Browser</h3>
+								<div class="object-browser">
+									<div class="browser-controls">
+										<select bind:value={objectBrowserCategory}>
+											<option value="all">All Categories</option>
+											{#each OBJECT_CATEGORIES as category}
+												<option value={category.id}>{category.name}</option>
+											{/each}
+										</select>
+									</div>
+									
+									<div class="object-grid">
+										{#each filteredObjects.slice(0, 12) as objectConfig}
+											<button 
+												class="object-card"
+												class:selected={selectedObject3D?.id === objectConfig.id}
+												on:click={() => selectObject(objectConfig)}
+											>
+												<div class="object-preview">
+													<Object3D 
+														config={objectConfig}
+														scale={0.8}
+														enableAnimation={false}
+														staticPreview={true}
+													/>
+												</div>
+												<div class="object-info">
+													<span class="object-name">{objectConfig.name}</span>
+													<span class="object-complexity">{objectConfig.complexity}</span>
+												</div>
+											</button>
+										{/each}
+									</div>
+									
+									{#if selectedObject3D}
+										<div class="preview-section">
+											<h4>Live Preview</h4>
+											<div class="live-preview" style="transform: scale({$previewScale})">
+												<Object3D 
+													bind:this={object3DPreviewRef}
+													config={selectedObject3D}
+													scale={threeDSettings.globalScale}
+													enableAnimation={threeDSettings.enableAnimations}
+													animationSpeed={threeDSettings.animationSpeed}
+													enableGlow={threeDSettings.enableGlow}
+													enableShadows={threeDSettings.enableShadows}
+													previewMode={true}
+												/>
+											</div>
+											<p class="preview-description">{selectedObject3D.description}</p>
+										</div>
+									{/if}
+								</div>
+							</div>
+						{/if}
 					</div>
 				{:else if activeTab === 'appearance'}
 					<div class="settings-section">
@@ -445,16 +670,6 @@
 									<span class="range-value">{settings?.ui?.blurIntensity || 8}px</span>
 								</label>
 							</div>
-							<div class="setting-row">
-								<label>
-									<span>Color adaptation</span>
-									<input 
-										type="checkbox" 
-										checked={settings?.ui?.adaptiveColors !== false}
-										on:change={(e) => updateSetting('ui.adaptiveColors', e.target.checked)}
-									/>
-								</label>
-							</div>
 						</div>
 					</div>
 				{:else if activeTab === 'performance'}
@@ -474,30 +689,10 @@
 									<span class="stat-label">Particles:</span>
 									<span class="stat-value">{performanceStats.particles}</span>
 								</div>
-							</div>
-							{#if performanceStats.fps < 30}
-								<div class="performance-suggestion">
-									<p>⚠️ Performance suggestion: Reduce particle count or disable special effects for smoother experience.</p>
-									<button 
-										class="optimize-button"
-										on:click={() => {
-											updateSetting('particles.count', 50);
-											updateSetting('particles.enabled', false);
-										}}
-									>
-										Auto-optimize
-									</button>
+								<div class="stat-item">
+									<span class="stat-label">3D Objects:</span>
+									<span class="stat-value">{performanceStats.objects3D}</span>
 								</div>
-							{/if}
-							<div class="setting-row">
-								<label>
-									<span>Performance monitoring</span>
-									<input 
-										type="checkbox" 
-										checked={settings?.performance?.monitoring !== false}
-										on:change={(e) => updateSetting('performance.monitoring', e.target.checked)}
-									/>
-								</label>
 							</div>
 						</div>
 					</div>
@@ -507,24 +702,16 @@
 							<h3>Keyboard Shortcuts</h3>
 							<div class="shortcut-list">
 								<div class="shortcut-item">
-									<span>Settings</span>
-									<kbd>Ctrl + S</kbd>
-								</div>
-								<div class="shortcut-item">
-									<span>Search</span>
+									<span>Open search:</span>
 									<kbd>Ctrl + K</kbd>
 								</div>
 								<div class="shortcut-item">
-									<span>Next wallpaper</span>
-									<kbd>Space</kbd>
+									<span>Open settings:</span>
+									<kbd>Ctrl + ,</kbd>
 								</div>
 								<div class="shortcut-item">
-									<span>Previous wallpaper</span>
-									<kbd>Shift + Space</kbd>
-								</div>
-								<div class="shortcut-item">
-									<span>Random wallpaper</span>
-									<kbd>R</kbd>
+									<span>New bookmark:</span>
+									<kbd>Ctrl + B</kbd>
 								</div>
 							</div>
 						</div>
@@ -624,8 +811,8 @@
 	.settings-panel {
 		width: 90vw;
 		height: 85vh;
-		max-width: 1200px;
-		max-height: 800px;
+		max-width: 1400px;
+		max-height: 900px;
 		background: rgba(255, 255, 255, 0.1);
 		backdrop-filter: blur(20px);
 		border-radius: 24px;
@@ -749,7 +936,7 @@
 	}
 	
 	.settings-section {
-		max-width: 600px;
+		max-width: 800px;
 	}
 	
 	.section-card {
@@ -760,11 +947,23 @@
 		margin-bottom: 24px;
 	}
 	
+	.section-card.warning {
+		border-color: rgba(255, 193, 7, 0.3);
+		background: rgba(255, 193, 7, 0.1);
+	}
+	
 	.section-card h3 {
 		margin: 0 0 20px 0;
 		font-size: 18px;
 		font-weight: 600;
 		color: white;
+	}
+	
+	.section-card h4 {
+		margin: 16px 0 12px 0;
+		font-size: 14px;
+		font-weight: 500;
+		color: rgba(255, 255, 255, 0.8);
 	}
 	
 	.setting-row {
@@ -808,6 +1007,149 @@
 		color: rgba(255, 255, 255, 0.8);
 	}
 	
+	.setting-group {
+		margin-bottom: 24px;
+	}
+	
+	.preset-buttons {
+		display: flex;
+		gap: 8px;
+		margin-top: 8px;
+	}
+	
+	.preset-button {
+		padding: 8px 16px;
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.1);
+		color: rgba(255, 255, 255, 0.8);
+		font-size: 12px;
+		cursor: pointer;
+		transition: all 0.3s ease;
+	}
+	
+	.preset-button:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.15);
+		color: white;
+	}
+	
+	.preset-button.active {
+		background: rgba(255, 255, 255, 0.2);
+		color: white;
+		border-color: rgba(255, 255, 255, 0.4);
+	}
+	
+	.preset-button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	
+	.object-browser {
+		margin-top: 16px;
+	}
+	
+	.browser-controls {
+		margin-bottom: 16px;
+	}
+	
+	.browser-controls select {
+		width: 100%;
+		max-width: 200px;
+		padding: 8px 12px;
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.1);
+		color: white;
+		font-size: 14px;
+	}
+	
+	.object-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+		gap: 12px;
+		margin-bottom: 24px;
+	}
+	
+	.object-card {
+		background: rgba(255, 255, 255, 0.05);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 12px;
+		padding: 12px;
+		cursor: pointer;
+		transition: all 0.3s ease;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 8px;
+	}
+	
+	.object-card:hover {
+		background: rgba(255, 255, 255, 0.1);
+		border-color: rgba(255, 255, 255, 0.3);
+		transform: translateY(-2px);
+	}
+	
+	.object-card.selected {
+		background: rgba(255, 255, 255, 0.15);
+		border-color: rgba(255, 255, 255, 0.4);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+	}
+	
+	.object-preview {
+		width: 60px;
+		height: 60px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(255, 255, 255, 0.05);
+		border-radius: 8px;
+	}
+	
+	.object-info {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 2px;
+	}
+	
+	.object-name {
+		font-size: 11px;
+		color: white;
+		text-align: center;
+		font-weight: 500;
+	}
+	
+	.object-complexity {
+		font-size: 9px;
+		color: rgba(255, 255, 255, 0.6);
+		text-transform: uppercase;
+	}
+	
+	.preview-section {
+		border-top: 1px solid rgba(255, 255, 255, 0.1);
+		padding-top: 20px;
+	}
+	
+	.live-preview {
+		width: 120px;
+		height: 120px;
+		margin: 16px auto;
+		background: rgba(255, 255, 255, 0.05);
+		border-radius: 12px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: transform 0.3s ease;
+	}
+	
+	.preview-description {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.7);
+		text-align: center;
+		margin: 0;
+		line-height: 1.4;
+	}
+	
 	.performance-stats {
 		display: flex;
 		gap: 24px;
@@ -815,6 +1157,7 @@
 		padding: 16px;
 		background: rgba(255, 255, 255, 0.05);
 		border-radius: 12px;
+		flex-wrap: wrap;
 	}
 	
 	.stat-item {
@@ -828,7 +1171,6 @@
 		font-size: 12px;
 		color: rgba(255, 255, 255, 0.6);
 		text-transform: uppercase;
-		letter-spacing: 0.5px;
 	}
 	
 	.stat-value {
@@ -841,35 +1183,6 @@
 		color: #ff6b6b;
 	}
 	
-	.performance-suggestion {
-		padding: 16px;
-		background: rgba(255, 107, 107, 0.1);
-		border: 1px solid rgba(255, 107, 107, 0.3);
-		border-radius: 12px;
-		margin-bottom: 20px;
-	}
-	
-	.performance-suggestion p {
-		margin: 0 0 12px 0;
-		color: #ff6b6b;
-		font-size: 14px;
-	}
-	
-	.optimize-button {
-		background: #ff6b6b;
-		color: white;
-		border: none;
-		padding: 8px 16px;
-		border-radius: 8px;
-		font-size: 14px;
-		cursor: pointer;
-		transition: all 0.3s ease;
-	}
-	
-	.optimize-button:hover {
-		background: #ff5252;
-	}
-	
 	.shortcut-list {
 		display: flex;
 		flex-direction: column;
@@ -880,80 +1193,79 @@
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		padding: 12px 16px;
-		background: rgba(255, 255, 255, 0.05);
-		border-radius: 8px;
+		color: rgba(255, 255, 255, 0.8);
+		font-size: 14px;
 	}
 	
-	.shortcut-item kbd {
-		background: rgba(255, 255, 255, 0.2);
-		padding: 4px 8px;
+	kbd {
+		background: rgba(255, 255, 255, 0.1);
+		border: 1px solid rgba(255, 255, 255, 0.2);
 		border-radius: 4px;
+		padding: 4px 8px;
 		font-size: 12px;
-		font-family: monospace;
+		color: white;
 	}
 	
 	.data-actions {
 		display: flex;
-		flex-direction: column;
 		gap: 12px;
+		flex-wrap: wrap;
 	}
 	
 	.action-button {
-		padding: 12px 16px;
-		border: none;
-		border-radius: 12px;
-		font-size: 14px;
-		font-weight: 500;
-		cursor: pointer;
 		display: flex;
 		align-items: center;
 		gap: 8px;
+		padding: 10px 16px;
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.1);
+		color: white;
+		font-size: 14px;
+		cursor: pointer;
 		transition: all 0.3s ease;
-		text-align: left;
+	}
+	
+	.action-button:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.15);
+		border-color: rgba(255, 255, 255, 0.3);
+	}
+	
+	.action-button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 	
 	.action-button.export {
-		background: rgba(76, 175, 80, 0.2);
-		color: #4caf50;
-		border: 1px solid rgba(76, 175, 80, 0.3);
-	}
-	
-	.action-button.export:hover {
-		background: rgba(76, 175, 80, 0.3);
+		border-color: rgba(34, 197, 94, 0.3);
+		background: rgba(34, 197, 94, 0.1);
 	}
 	
 	.action-button.import {
-		background: rgba(33, 150, 243, 0.2);
-		color: #2196f3;
-		border: 1px solid rgba(33, 150, 243, 0.3);
-	}
-	
-	.action-button.import:hover {
-		background: rgba(33, 150, 243, 0.3);
+		border-color: rgba(59, 130, 246, 0.3);
+		background: rgba(59, 130, 246, 0.1);
 	}
 	
 	.action-button.reset {
-		background: rgba(244, 67, 54, 0.2);
-		color: #f44336;
-		border: 1px solid rgba(244, 67, 54, 0.3);
-	}
-	
-	.action-button.reset:hover {
-		background: rgba(244, 67, 54, 0.3);
+		border-color: rgba(239, 68, 68, 0.3);
+		background: rgba(239, 68, 68, 0.1);
 	}
 	
 	.spinner {
 		width: 16px;
 		height: 16px;
-		border: 2px solid transparent;
-		border-top: 2px solid currentColor;
+		border: 2px solid rgba(255, 255, 255, 0.3);
+		border-top: 2px solid white;
 		border-radius: 50%;
 		animation: spin 1s linear infinite;
 	}
 	
 	@keyframes spin {
 		to { transform: rotate(360deg); }
+	}
+	
+	.webgl-info {
+		margin-top: 16px;
 	}
 	
 	.confirm-modal {
@@ -966,27 +1278,27 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		z-index: 1001;
+		z-index: 1100;
 	}
 	
 	.confirm-dialog {
 		background: rgba(255, 255, 255, 0.1);
 		backdrop-filter: blur(20px);
 		border-radius: 16px;
-		padding: 32px;
-		max-width: 400px;
-		text-align: center;
 		border: 1px solid rgba(255, 255, 255, 0.2);
+		padding: 24px;
+		max-width: 400px;
+		width: 90%;
 	}
 	
 	.confirm-dialog h3 {
-		margin: 0 0 16px 0;
+		margin: 0 0 12px 0;
 		color: white;
-		font-size: 20px;
+		font-size: 18px;
 	}
 	
 	.confirm-dialog p {
-		margin: 0 0 24px 0;
+		margin: 0 0 20px 0;
 		color: rgba(255, 255, 255, 0.8);
 		line-height: 1.5;
 	}
@@ -994,70 +1306,25 @@
 	.confirm-actions {
 		display: flex;
 		gap: 12px;
-		justify-content: center;
+		justify-content: flex-end;
 	}
 	
 	.cancel-button, .confirm-button {
-		padding: 12px 24px;
-		border: none;
+		padding: 8px 16px;
+		border: 1px solid rgba(255, 255, 255, 0.2);
 		border-radius: 8px;
-		font-size: 14px;
-		font-weight: 500;
+		background: rgba(255, 255, 255, 0.1);
+		color: white;
 		cursor: pointer;
 		transition: all 0.3s ease;
 	}
 	
-	.cancel-button {
-		background: rgba(255, 255, 255, 0.1);
-		color: white;
-	}
-	
-	.cancel-button:hover {
-		background: rgba(255, 255, 255, 0.2);
-	}
-	
 	.confirm-button {
-		background: #f44336;
-		color: white;
+		background: rgba(239, 68, 68, 0.2);
+		border-color: rgba(239, 68, 68, 0.3);
 	}
 	
-	.confirm-button:hover {
-		background: #d32f2f;
-	}
-	
-	@media (max-width: 768px) {
-		.settings-panel {
-			width: 95vw;
-			height: 90vh;
-		}
-		
-		.panel-body {
-			flex-direction: column;
-		}
-		
-		.settings-nav {
-			width: 100%;
-			display: flex;
-			overflow-x: auto;
-			overflow-y: hidden;
-			border-right: none;
-			border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-			padding: 12px 0;
-		}
-		
-		.nav-tab {
-			white-space: nowrap;
-			border-right: none;
-			border-bottom: 3px solid transparent;
-		}
-		
-		.nav-tab.active {
-			border-right: none;
-			border-bottom: 3px solid rgba(255, 255, 255, 0.8);
-		}
-		
-		.settings-content {
-			padding: 20px;
-		}
+	.cancel-button:hover, .confirm-button:hover {
+		background: rgba(255, 255, 255, 0.15);
 	}
 </style>

@@ -2,24 +2,37 @@ import { writable, derived, get } from 'svelte/store';
 import { browser } from '$app/environment';
 import { debounce } from '$lib/utils';
 
-export interface KeyboardModifier {
-	keys: string[];
-	label: string;
-	code: string;
-}
+// ===== TYPE DEFINITIONS =====
+
+export type KeyboardModifier = 'ctrl' | 'cmd' | 'alt' | 'shift';
+export type ThemeColorMode = 'auto' | 'light' | 'dark' | 'custom';
+export type PerformanceMode = 'auto' | 'high' | 'balanced' | 'low';
+export type Objects3DPerformanceMode = 'low' | 'medium' | 'high' | 'ultra';
+export type MaterialType = 'standard' | 'physical' | 'phong' | 'lambert' | 'toon';
+export type ColorAdaptationMode = 'auto' | 'dominant' | 'vibrant' | 'muted' | 'custom';
 
 export interface KeyboardShortcuts {
-	toggleSettings: string;
-	focusSearch: string;
+	openSearch: string;
+	openSettings: string;
+	toggleFullscreen: string;
 	nextWallpaper: string;
-	prevWallpaper: string;
+	previousWallpaper: string;
 	toggleParticles: string;
-	clearCache: string;
-	cyclePerformanceMode: string;
-	exportSettings: string;
-	importSettings: string;
-	resetSettings: string;
-	toggleDebugMode: string;
+	newBookmark: string;
+	exportData: string;
+	undo: string;
+	redo: string;
+}
+
+export interface SearchEngine {
+	id: string;
+	name: string;
+	url: string;
+	icon?: string;
+	isDefault: boolean;
+	isCustom: boolean;
+	suggestions?: boolean;
+	shortcuts?: string[];
 }
 
 export interface ParticleSettings {
@@ -27,130 +40,86 @@ export interface ParticleSettings {
 	count: number;
 	speed: number;
 	connectionDistance: number;
-	connectionOpacity: number;
-	mouseRepulsion: number;
-	mouseAttraction: number;
 	opacity: number;
 	size: number;
-	blur: boolean;
-	glow: boolean;
-	colorMode: 'dominant' | 'rainbow' | 'monochrome' | 'custom';
-	customColor: string;
-	physics: {
-		gravity: number;
-		friction: number;
-		bounce: boolean;
-	};
-	interactions: {
-		mouseRepulsion: boolean;
-		mouseAttraction: boolean;
-		clickRipple: boolean;
-		edgeBounce: boolean;
-	};
+	color: string;
+	responseRadius: number;
+	maxConnections: number;
+	enablePhysics: boolean;
+	enableTrails: boolean;
+	quality: 'low' | 'medium' | 'high';
+	adaptToTheme: boolean;
+	interactionStrength: number;
+	fadeEdges: boolean;
 }
 
 export interface WallpaperSettings {
-	transitionDuration: number;
-	cycleDuration: number;
 	currentTheme: string;
-	autoTransition: boolean;
-	preloadCount: number;
-	transitionType: 'fade' | 'slide' | 'zoom' | 'blur';
-	quality: 'auto' | 'low' | 'medium' | 'high' | 'ultra';
-	scaling: 'cover' | 'contain' | 'fill' | 'scale-down';
-	filters: {
-		brightness: number;
-		contrast: number;
-		saturation: number;
-		blur: number;
-		sepia: number;
-		grayscale: number;
-	};
-	randomization: {
-		enabled: boolean;
-		excludeCategories: string[];
-		favoriteWeighting: number;
-	};
-}
-
-export interface SearchEngine {
-	id: string;
-	name: string;
-	icon: string;
-	url: string;
-	placeholder?: string;
-	isDefault: boolean;
-	isCustom: boolean;
-	suggestions: boolean;
-	category: 'web' | 'code' | 'academic' | 'media' | 'shopping' | 'custom';
-	hotkey?: string;
+	autoCycle: boolean;
+	cycleInterval: number;
+	transitionType: string;
+	preloadNext: boolean;
+	maintainAspectRatio: boolean;
+	backgroundBlur: number;
+	dimming: number;
+	saturation: number;
+	contrast: number;
+	enableColorExtraction: boolean;
+	colorExtractionQuality: 'fast' | 'balanced' | 'quality';
+	shuffleMode: boolean;
+	favoriteThemes: string[];
 }
 
 export interface UISettings {
-	fontSize: 'xs' | 'sm' | 'base' | 'lg' | 'xl' | '2xl';
-	fontWeight: 300 | 400 | 500 | 600 | 700;
-	lineHeight: number;
-	letterSpacing: number;
-	autoHideTimeout: number;
-	showClock: boolean;
-	clockFormat: '12h' | '24h';
-	clockPosition: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center';
-	showWeather: boolean;
-	weatherLocation: string;
-	showQuote: boolean;
-	quoteCategory: 'inspirational' | 'tech' | 'random' | 'custom';
-	customQuotes: string[];
-	bookmarkSize: number;
-	folderSize: number;
-	gridColumns: number | 'auto';
-	compactMode: boolean;
+	opacity: number;
+	blurIntensity: number;
+	cornerRadius: number;
+	colorMode: ThemeColorMode;
+	adaptiveColors: boolean;
+	customTheme: {
+		primary: string;
+		secondary: string;
+		accent: string;
+		background: string;
+		text: string;
+	};
 	animations: {
 		enabled: boolean;
-		speed: number;
-		easing: 'linear' | 'ease' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'spring' | 'bounce';
+		duration: number;
+		easing: string;
 		reduceMotion: boolean;
-		pageTransitions: boolean;
-		hoverEffects: boolean;
-		loadingAnimations: boolean;
+		enableHoverEffects: boolean;
+		enableFocusEffects: boolean;
+		staggerDelay: number;
 	};
-	glassmorphism: {
-		intensity: number;
-		blur: number;
-		opacity: number;
-		borderOpacity: number;
-		shadows: boolean;
+	layout: {
+		maxWidth: number;
+		spacing: number;
+		verticalAlignment: 'top' | 'center' | 'bottom';
+		horizontalAlignment: 'left' | 'center' | 'right';
 	};
-	theme: {
-		mode: 'auto' | 'light' | 'dark' | 'system';
-		customColors: {
-			primary: string;
-			secondary: string;
-			accent: string;
-			background: string;
-			surface: string;
-			text: string;
+	responsiveness: {
+		enableMobileOptimization: boolean;
+		breakpoints: {
+			mobile: number;
+			tablet: number;
+			desktop: number;
 		};
-		colorAdaptation: boolean;
-		highContrast: boolean;
 	};
 }
 
 export interface PerformanceSettings {
-	mode: 'auto' | 'high' | 'balanced' | 'low' | 'custom';
+	mode: PerformanceMode;
 	targetFPS: number;
-	maxParticles: number;
-	enableBlur: boolean;
-	enableShadows: boolean;
 	enableGPUAcceleration: boolean;
-	enableWebWorkers: boolean;
-	cacheSize: number;
-	preloadImages: number;
-	lowMemoryMode: boolean;
-	powerSaveMode: boolean;
+	preloadImages: boolean;
+	enableLazyLoading: boolean;
+	memoryLimit: number;
+	enableMetrics: boolean;
+	adaptToDevice: boolean;
 	monitoring: {
-		enabled: boolean;
-		showFPS: boolean;
-		showMemory: boolean;
+		enableFPSCounter: boolean;
+		enableMemoryUsage: boolean;
 		showLoadTimes: boolean;
 		logPerformance: boolean;
 	};
@@ -164,7 +133,7 @@ export interface PerformanceSettings {
 }
 
 export interface ColorSettings {
-	extractionQuality: 'fast' | 'balanced' | 'high';
+	extractionQuality: 'fast' | 'balanced' | 'quality';
 	cacheSize: number;
 	updateInterval: number;
 	smoothTransitions: boolean;
@@ -221,6 +190,58 @@ export interface SecuritySettings {
 	anonymizeData: boolean;
 }
 
+export interface Objects3DSettings {
+	enabled: boolean;
+	performanceMode: Objects3DPerformanceMode;
+	enableAnimations: boolean;
+	enableGlow: boolean;
+	enableShadows: boolean;
+	enableReflections: boolean;
+	globalScale: number;
+	animationSpeed: number;
+	autoMigration: boolean;
+	fallbackTo2D: boolean;
+	lodEnabled: boolean;
+	shadowQuality: 'low' | 'medium' | 'high';
+	lightingQuality: 'low' | 'medium' | 'high';
+	antiAliasing: boolean;
+	renderResolution: number;
+	maxActiveObjects: number;
+	cullingDistance: number;
+	materialQuality: 'low' | 'medium' | 'high';
+	defaultMaterial: MaterialType;
+	colorAdaptation: {
+		enabled: boolean;
+		mode: ColorAdaptationMode;
+		intensity: number;
+		saturationBoost: number;
+		lightnessAdjust: number;
+		transitionDuration: number;
+	};
+	physics: {
+		enabled: boolean;
+		gravity: number;
+		friction: number;
+		bounciness: number;
+	};
+	interaction: {
+		enableHover: boolean;
+		enableClick: boolean;
+		enableDrag: boolean;
+		hoverScale: number;
+		clickScale: number;
+		responseTime: number;
+	};
+	optimization: {
+		frustumCulling: boolean;
+		occlusionCulling: boolean;
+		instanceMerging: boolean;
+		geometryOptimization: boolean;
+		textureCompression: boolean;
+		autoLOD: boolean;
+	};
+}
+
 export interface ThemeProfile {
 	id: string;
 	name: string;
@@ -232,6 +253,7 @@ export interface ThemeProfile {
 	ui: Partial<UISettings>;
 	color: Partial<ColorSettings>;
 	performance: Partial<PerformanceSettings>;
+	objects3d?: Partial<Objects3DSettings>;
 	dominantColor?: string;
 	isBuiltIn: boolean;
 	isActive: boolean;
@@ -264,6 +286,7 @@ export interface Settings {
 	accessibility: AccessibilitySettings;
 	developer: DeveloperSettings;
 	security: SecuritySettings;
+	objects3d: Objects3DSettings;
 	profiles: ThemeProfile[];
 	activeProfile?: string;
 	backup: {
@@ -282,209 +305,131 @@ export interface Settings {
 	};
 }
 
-const DEFAULT_SEARCH_ENGINES: SearchEngine[] = [
-	{
-		id: 'brave',
-		name: 'Brave Search',
-		icon: '🦁',
-		url: 'https://search.brave.com/search?q=%s',
-		placeholder: 'Search with Brave...',
-		isDefault: true,
-		isCustom: false,
-		suggestions: true,
-		category: 'web',
-		hotkey: 'b'
-	},
-	{
-		id: 'duckduckgo',
-		name: 'DuckDuckGo',
-		icon: '🦆',
-		url: 'https://duckduckgo.com/?q=%s',
-		placeholder: 'Search with DuckDuckGo...',
-		isDefault: false,
-		isCustom: false,
-		suggestions: true,
-		category: 'web',
-		hotkey: 'd'
-	},
-	{
-		id: 'google',
-		name: 'Google',
-		icon: '🔍',
-		url: 'https://www.google.com/search?q=%s',
-		placeholder: 'Search with Google...',
-		isDefault: false,
-		isCustom: false,
-		suggestions: true,
-		category: 'web',
-		hotkey: 'g'
-	},
-	{
-		id: 'github',
-		name: 'GitHub',
-		icon: '💻',
-		url: 'https://github.com/search?q=%s',
-		placeholder: 'Search GitHub...',
-		isDefault: false,
-		isCustom: false,
-		suggestions: false,
-		category: 'code',
-		hotkey: 'h'
-	},
-	{
-		id: 'youtube',
-		name: 'YouTube',
-		icon: '📺',
-		url: 'https://www.youtube.com/results?search_query=%s',
-		placeholder: 'Search YouTube...',
-		isDefault: false,
-		isCustom: false,
-		suggestions: true,
-		category: 'media',
-		hotkey: 'y'
-	}
-];
+// ===== DEFAULT SETTINGS =====
 
 const DEFAULT_SETTINGS: Settings = {
-	version: '2.0.0',
+	version: '2.1.0',
 	lastUpdated: Date.now(),
-	migrationVersion: 1,
+	migrationVersion: 2,
 	keyboard: {
-		modifier: {
-			keys: ['ctrl'],
-			label: 'Ctrl',
-			code: 'ctrl'
-		},
+		modifier: 'ctrl',
 		shortcuts: {
-			toggleSettings: 's',
-			focusSearch: 'k',
-			nextWallpaper: 'arrowright',
-			prevWallpaper: 'arrowleft',
-			toggleParticles: 'p',
-			clearCache: 'delete',
-			cyclePerformanceMode: 'm',
-			exportSettings: 'e',
-			importSettings: 'i',
-			resetSettings: 'r',
-			toggleDebugMode: 'f12'
+			openSearch: 'ctrl+k',
+			openSettings: 'ctrl+comma',
+			toggleFullscreen: 'f11',
+			nextWallpaper: 'ctrl+right',
+			previousWallpaper: 'ctrl+left',
+			toggleParticles: 'ctrl+p',
+			newBookmark: 'ctrl+b',
+			exportData: 'ctrl+e',
+			undo: 'ctrl+z',
+			redo: 'ctrl+y'
 		},
 		customShortcuts: {},
 		enableGlobalShortcuts: true
 	},
 	particles: {
 		enabled: true,
-		count: 75,
+		count: 80,
 		speed: 0.5,
-		connectionDistance: 150,
-		connectionOpacity: 0.3,
-		mouseRepulsion: 100,
-		mouseAttraction: 50,
+		connectionDistance: 120,
 		opacity: 0.6,
 		size: 2,
-		blur: false,
-		glow: true,
-		colorMode: 'dominant',
-		customColor: '#ffffff',
-		physics: {
-			gravity: 0,
-			friction: 0.98,
-			bounce: true
-		},
-		interactions: {
-			mouseRepulsion: true,
-			mouseAttraction: false,
-			clickRipple: true,
-			edgeBounce: true
-		}
+		color: '#ffffff',
+		responseRadius: 150,
+		maxConnections: 3,
+		enablePhysics: false,
+		enableTrails: false,
+		quality: 'medium',
+		adaptToTheme: true,
+		interactionStrength: 1.0,
+		fadeEdges: true
 	},
 	wallpaper: {
-		transitionDuration: 1000,
-		cycleDuration: 300000, // 5 minutes
 		currentTheme: 'default',
-		autoTransition: true,
-		preloadCount: 3,
+		autoCycle: true,
+		cycleInterval: 600000,
 		transitionType: 'fade',
-		quality: 'auto',
-		scaling: 'cover',
-		filters: {
-			brightness: 100,
-			contrast: 100,
-			saturation: 100,
-			blur: 0,
-			sepia: 0,
-			grayscale: 0
-		},
-		randomization: {
-			enabled: true,
-			excludeCategories: [],
-			favoriteWeighting: 2
-		}
+		preloadNext: true,
+		maintainAspectRatio: true,
+		backgroundBlur: 0,
+		dimming: 0,
+		saturation: 100,
+		contrast: 100,
+		enableColorExtraction: true,
+		colorExtractionQuality: 'balanced',
+		shuffleMode: false,
+		favoriteThemes: []
 	},
-	searchEngines: DEFAULT_SEARCH_ENGINES,
+	searchEngines: [
+		{
+			id: 'google',
+			name: 'Google',
+			url: 'https://www.google.com/search?q=%s',
+			isDefault: true,
+			isCustom: false,
+			suggestions: true,
+			shortcuts: ['g', 'google']
+		},
+		{
+			id: 'duckduckgo',
+			name: 'DuckDuckGo',
+			url: 'https://duckduckgo.com/?q=%s',
+			isDefault: false,
+			isCustom: false,
+			suggestions: true,
+			shortcuts: ['ddg', 'duck']
+		}
+	],
 	ui: {
-		fontSize: 'base',
-		fontWeight: 400,
-		lineHeight: 1.6,
-		letterSpacing: 0,
-		autoHideTimeout: 30000,
-		showClock: false,
-		clockFormat: '24h',
-		clockPosition: 'top-right',
-		showWeather: false,
-		weatherLocation: '',
-		showQuote: false,
-		quoteCategory: 'inspirational',
-		customQuotes: [],
-		bookmarkSize: 1,
-		folderSize: 1,
-		gridColumns: 'auto',
-		compactMode: false,
+		opacity: 90,
+		blurIntensity: 8,
+		cornerRadius: 12,
+		colorMode: 'auto',
+		adaptiveColors: true,
+		customTheme: {
+			primary: '#4a90e2',
+			secondary: '#7b68ee',
+			accent: '#50c878',
+			background: 'rgba(255, 255, 255, 0.1)',
+			text: '#ffffff'
+		},
 		animations: {
 			enabled: true,
-			speed: 1,
-			easing: 'ease-out',
+			duration: 300,
+			easing: 'cubic-bezier(0.25, 0.46, 0.45, 0.94)',
 			reduceMotion: false,
-			pageTransitions: true,
-			hoverEffects: true,
-			loadingAnimations: true
+			enableHoverEffects: true,
+			enableFocusEffects: true,
+			staggerDelay: 50
 		},
-		glassmorphism: {
-			intensity: 0.8,
-			blur: 12,
-			opacity: 0.1,
-			borderOpacity: 0.2,
-			shadows: true
+		layout: {
+			maxWidth: 1200,
+			spacing: 16,
+			verticalAlignment: 'center',
+			horizontalAlignment: 'center'
 		},
-		theme: {
-			mode: 'auto',
-			customColors: {
-				primary: '#4a90e2',
-				secondary: '#5ba3f5',
-				accent: '#ff6b6b',
-				background: '#000000',
-				surface: '#1a1a1a',
-				text: '#ffffff'
-			},
-			colorAdaptation: true,
-			highContrast: false
+		responsiveness: {
+			enableMobileOptimization: true,
+			breakpoints: {
+				mobile: 768,
+				tablet: 1024,
+				desktop: 1440
+			}
 		}
 	},
 	performance: {
 		mode: 'auto',
-		targetFPS: 120,
-		maxParticles: 150,
-		enableBlur: true,
-		enableShadows: true,
+		targetFPS: 60,
 		enableGPUAcceleration: true,
-		enableWebWorkers: true,
-		cacheSize: 500,
-		preloadImages: 5,
-		lowMemoryMode: false,
-		powerSaveMode: false,
+		preloadImages: true,
+		enableLazyLoading: true,
+		memoryLimit: 512,
+		enableMetrics: false,
+		adaptToDevice: true,
 		monitoring: {
-			enabled: false,
-			showFPS: false,
-			showMemory: false,
+			enableFPSCounter: false,
+			enableMemoryUsage: false,
 			showLoadTimes: false,
 			logPerformance: false
 		},
@@ -545,15 +490,66 @@ const DEFAULT_SETTINGS: Settings = {
 		trackingProtection: true,
 		contentSecurityPolicy: true,
 		localStorageEncryption: false,
-		sessionTimeout: 3600000, // 1 hour
+		sessionTimeout: 3600000,
 		secureHeaders: true,
-		dataRetention: 2592000000, // 30 days
+		dataRetention: 2592000000,
 		anonymizeData: true
+	},
+	objects3d: {
+		enabled: true,
+		performanceMode: 'high',
+		enableAnimations: true,
+		enableGlow: true,
+		enableShadows: true,
+		enableReflections: false,
+		globalScale: 1.0,
+		animationSpeed: 1.0,
+		autoMigration: true,
+		fallbackTo2D: true,
+		lodEnabled: true,
+		shadowQuality: 'medium',
+		lightingQuality: 'medium',
+		antiAliasing: true,
+		renderResolution: 1.0,
+		maxActiveObjects: 50,
+		cullingDistance: 1000,
+		materialQuality: 'medium',
+		defaultMaterial: 'standard',
+		colorAdaptation: {
+			enabled: true,
+			mode: 'auto',
+			intensity: 1.0,
+			saturationBoost: 0.2,
+			lightnessAdjust: 0.0,
+			transitionDuration: 800
+		},
+		physics: {
+			enabled: false,
+			gravity: -9.81,
+			friction: 0.8,
+			bounciness: 0.3
+		},
+		interaction: {
+			enableHover: true,
+			enableClick: true,
+			enableDrag: false,
+			hoverScale: 1.1,
+			clickScale: 0.95,
+			responseTime: 200
+		},
+		optimization: {
+			frustumCulling: true,
+			occlusionCulling: false,
+			instanceMerging: true,
+			geometryOptimization: true,
+			textureCompression: true,
+			autoLOD: true
+		}
 	},
 	profiles: [],
 	backup: {
 		autoBackup: true,
-		backupInterval: 86400000, // 24 hours
+		backupInterval: 86400000,
 		maxBackups: 10,
 		includeImages: false,
 		cloudSync: false
@@ -566,243 +562,246 @@ const DEFAULT_SETTINGS: Settings = {
 	}
 };
 
+// ===== SETTINGS STORE CLASS =====
+
 class SettingsStore {
 	private store = writable<Settings>(DEFAULT_SETTINGS);
-	private storageKey = 'particle-nexus-settings-v2';
+	private storageKey = 'particle-nexus-settings-v2.1';
 	private backupKey = 'particle-nexus-settings-backup';
 	private changeListeners = new Set<(settings: Settings) => void>();
 	private debouncedSave = debounce(this.saveToStorage.bind(this), 1000);
 	private validationRules = new Map<string, (value: any) => boolean>();
 
+	constructor() {
+		this.setupValidationRules();
+		this.loadFromStorage();
+		this.startAutoBackup();
+
+		// Subscribe to store changes and save to storage
+		this.store.subscribe((settings) => {
+			this.debouncedSave(settings);
+			this.notifyChangeListeners(settings);
+		});
+	}
+
+	// Public API
 	subscribe = this.store.subscribe;
 
-	constructor() {
-		this.initializeValidationRules();
+	update(updater: (settings: Settings) => Settings): void {
+		this.store.update((settings) => {
+			const updated = updater(settings);
+			return {
+				...updated,
+				lastUpdated: Date.now()
+			};
+		});
 	}
 
-	async initialize(): Promise<void> {
-		if (!browser) return;
+	set(settings: Settings): void {
+		const validated = this.validateSettings(settings);
+		this.store.set({
+			...validated,
+			lastUpdated: Date.now()
+		});
+	}
 
-		try {
-			const stored = localStorage.getItem(this.storageKey);
-			if (stored) {
-				const parsed = JSON.parse(stored);
-				const migrated = this.migrateSettings(parsed);
-				const validated = this.validateSettings(migrated);
-				this.store.set(validated);
-			} else {
-				// Check for legacy settings
-				const legacy = localStorage.getItem('particle-nexus-settings');
-				if (legacy) {
-					const migrated = this.migrateLegacySettings(JSON.parse(legacy));
-					this.store.set(migrated);
-					this.saveToStorage(migrated);
-				} else {
-					// First time setup - detect optimal settings
-					const detectedSettings = await this.detectOptimalSettings();
-					this.store.update(s => ({ ...s, ...detectedSettings }));
+	get(): Settings {
+		return get(this.store);
+	}
+
+	// Settings updates
+	updateSetting<K extends keyof Settings>(key: K, value: Settings[K]): void {
+		this.update((settings) => ({
+			...settings,
+			[key]: value
+		}));
+	}
+
+	updateNestedSetting(path: string, value: any): void {
+		this.update((settings) => {
+			const newSettings = { ...settings };
+			this.setNestedValue(newSettings, path, value);
+			return newSettings;
+		});
+	}
+
+	// 3D Settings specific methods
+	update3DSettings(updates: Partial<Objects3DSettings>): void {
+		this.update((settings) => ({
+			...settings,
+			objects3d: {
+				...settings.objects3d,
+				...updates
+			}
+		}));
+	}
+
+	apply3DPerformancePreset(preset: Objects3DPerformanceMode): void {
+		const presets: Record<Objects3DPerformanceMode, Partial<Objects3DSettings>> = {
+			low: {
+				enableAnimations: false,
+				enableGlow: false,
+				enableShadows: false,
+				enableReflections: false,
+				shadowQuality: 'low',
+				lightingQuality: 'low',
+				antiAliasing: false,
+				renderResolution: 0.75,
+				maxActiveObjects: 20,
+				materialQuality: 'low',
+				lodEnabled: true,
+				optimization: {
+					frustumCulling: true,
+					occlusionCulling: true,
+					instanceMerging: true,
+					geometryOptimization: true,
+					textureCompression: true,
+					autoLOD: true
+				}
+			},
+			medium: {
+				enableAnimations: true,
+				enableGlow: false,
+				enableShadows: false,
+				enableReflections: false,
+				shadowQuality: 'low',
+				lightingQuality: 'medium',
+				antiAliasing: true,
+				renderResolution: 0.9,
+				maxActiveObjects: 35,
+				materialQuality: 'medium',
+				lodEnabled: true,
+				optimization: {
+					frustumCulling: true,
+					occlusionCulling: false,
+					instanceMerging: true,
+					geometryOptimization: true,
+					textureCompression: true,
+					autoLOD: true
+				}
+			},
+			high: {
+				enableAnimations: true,
+				enableGlow: true,
+				enableShadows: true,
+				enableReflections: false,
+				shadowQuality: 'medium',
+				lightingQuality: 'high',
+				antiAliasing: true,
+				renderResolution: 1.0,
+				maxActiveObjects: 50,
+				materialQuality: 'high',
+				lodEnabled: true,
+				optimization: {
+					frustumCulling: true,
+					occlusionCulling: false,
+					instanceMerging: true,
+					geometryOptimization: true,
+					textureCompression: false,
+					autoLOD: true
+				}
+			},
+			ultra: {
+				enableAnimations: true,
+				enableGlow: true,
+				enableShadows: true,
+				enableReflections: true,
+				shadowQuality: 'high',
+				lightingQuality: 'high',
+				antiAliasing: true,
+				renderResolution: 1.25,
+				maxActiveObjects: 100,
+				materialQuality: 'high',
+				lodEnabled: false,
+				optimization: {
+					frustumCulling: true,
+					occlusionCulling: false,
+					instanceMerging: false,
+					geometryOptimization: false,
+					textureCompression: false,
+					autoLOD: false
 				}
 			}
+		};
 
-			// Start automatic backup if enabled
-			this.startAutoBackup();
-
-		} catch (error) {
-			console.warn('Failed to load settings:', error);
-			this.loadBackup();
-		}
-	}
-
-	update(updater: (settings: Settings) => Settings): void {
-		this.store.update(settings => {
-			const newSettings = updater(settings);
-			const validated = this.validateSettings(newSettings);
-			validated.lastUpdated = Date.now();
-			
-			this.debouncedSave(validated);
-			this.notifyChangeListeners(validated);
-			
-			return validated;
+		const presetSettings = presets[preset];
+		this.update3DSettings({
+			performanceMode: preset,
+			...presetSettings
 		});
 	}
 
-	// Enhanced setting methods
-	updatePartial<K extends keyof Settings>(
-		section: K, 
-		updates: Partial<Settings[K]>
-	): void {
-		this.update(settings => ({
-			...settings,
-			[section]: { ...settings[section], ...updates }
-		}));
-	}
-
-	batchUpdate(updates: Partial<Settings>): void {
-		this.update(settings => ({ ...settings, ...updates }));
-	}
-
-	// Font size management
-	setFontSize(size: UISettings['fontSize']): void {
-		this.updatePartial('ui', { fontSize: size });
-		
-		// Apply immediately to DOM
-		if (browser) {
-			document.body.setAttribute('data-font-size', size);
+	// WebGL support detection and auto-configuration
+	configureFor3DSupport(webGLSupported: boolean, deviceCapabilities?: any): void {
+		if (!webGLSupported) {
+			this.update3DSettings({
+				enabled: false,
+				fallbackTo2D: true
+			});
+			return;
 		}
-	}
 
-	// Performance mode management
-	setPerformanceMode(mode: PerformanceSettings['mode']): void {
-		const modeSettings = this.getPerformanceModeSettings(mode);
-		this.updatePartial('performance', { mode, ...modeSettings });
-	}
+		// Auto-detect performance mode based on device capabilities
+		if (deviceCapabilities) {
+			const { gpu, memory, cores } = deviceCapabilities;
+			let recommendedMode: Objects3DPerformanceMode = 'medium';
 
-	private getPerformanceModeSettings(mode: PerformanceSettings['mode']): Partial<PerformanceSettings> {
-		switch (mode) {
-			case 'high':
-				return {
-					targetFPS: 120,
-					maxParticles: 150,
-					enableBlur: true,
-					enableShadows: true,
-					enableGPUAcceleration: true,
-					enableWebWorkers: true
-				};
-			case 'balanced':
-				return {
-					targetFPS: 60,
-					maxParticles: 100,
-					enableBlur: true,
-					enableShadows: true,
-					enableGPUAcceleration: true,
-					enableWebWorkers: true
-				};
-			case 'low':
-				return {
-					targetFPS: 30,
-					maxParticles: 50,
-					enableBlur: false,
-					enableShadows: false,
-					enableGPUAcceleration: false,
-					enableWebWorkers: false
-				};
-			default:
-				return {};
-		}
-	}
-
-	// Color settings management
-	setColorExtractionQuality(quality: ColorSettings['extractionQuality']): void {
-		this.updatePartial('color', { extractionQuality: quality });
-	}
-
-	// Glassmorphism management
-	setGlassmorphismIntensity(intensity: number): void {
-		const clampedIntensity = Math.max(0, Math.min(1, intensity));
-		this.updatePartial('ui', {
-			glassmorphism: {
-				...get(this.store).ui.glassmorphism,
-				intensity: clampedIntensity,
-				blur: 4 + (clampedIntensity * 20),
-				opacity: 0.05 + (clampedIntensity * 0.15)
+			if (memory < 4096 || cores < 4) {
+				recommendedMode = 'low';
+			} else if (memory >= 8192 && cores >= 8 && gpu?.tier >= 2) {
+				recommendedMode = 'high';
+			} else if (memory >= 16384 && cores >= 12 && gpu?.tier >= 3) {
+				recommendedMode = 'ultra';
 			}
-		});
-	}
 
-	// Search engine management
-	addSearchEngine(engine: Omit<SearchEngine, 'id'>): void {
-		const id = `custom_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-		const newEngine: SearchEngine = { ...engine, id, isCustom: true };
-		
-		this.update(settings => ({
-			...settings,
-			searchEngines: [...settings.searchEngines, newEngine]
-		}));
-	}
-
-	updateSearchEngine(id: string, updates: Partial<SearchEngine>): void {
-		this.update(settings => ({
-			...settings,
-			searchEngines: settings.searchEngines.map(engine =>
-				engine.id === id ? { ...engine, ...updates } : engine
-			)
-		}));
-	}
-
-	removeSearchEngine(id: string): void {
-		this.update(settings => ({
-			...settings,
-			searchEngines: settings.searchEngines.filter(engine => engine.id !== id)
-		}));
-	}
-
-	setDefaultSearchEngine(id: string): void {
-		this.update(settings => ({
-			...settings,
-			searchEngines: settings.searchEngines.map(engine => ({
-				...engine,
-				isDefault: engine.id === id
-			}))
-		}));
+			this.apply3DPerformancePreset(recommendedMode);
+		}
 	}
 
 	// Profile management
-	saveProfile(profile: Omit<ThemeProfile, 'id' | 'createdAt' | 'updatedAt'>): void {
-		const newProfile: ThemeProfile = {
-			...profile,
-			id: `profile_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+	createProfile(name: string, description: string): ThemeProfile {
+		const currentSettings = this.get();
+		const profile: ThemeProfile = {
+			id: `profile_${Date.now()}`,
+			name,
+			description,
+			version: currentSettings.version,
+			author: 'User',
+			wallpaperTheme: currentSettings.wallpaper.currentTheme,
+			particles: currentSettings.particles,
+			ui: currentSettings.ui,
+			color: currentSettings.color,
+			performance: currentSettings.performance,
+			objects3d: currentSettings.objects3d,
+			isBuiltIn: false,
+			isActive: false,
 			createdAt: Date.now(),
-			updatedAt: Date.now()
+			updatedAt: Date.now(),
+			tags: []
 		};
 
-		this.update(settings => ({
+		this.update((settings) => ({
 			...settings,
-			profiles: [...settings.profiles, newProfile]
+			profiles: [...settings.profiles, profile]
 		}));
-	}
 
-	loadProfile(profileId: string): void {
-		const settings = get(this.store);
-		const profile = settings.profiles.find(p => p.id === profileId);
-		if (!profile) return;
-
-		const updates: Partial<Settings> = {
-			activeProfile: profileId
-		};
-
-		if (profile.particles) updates.particles = { ...settings.particles, ...profile.particles };
-		if (profile.ui) updates.ui = { ...settings.ui, ...profile.ui };
-		if (profile.color) updates.color = { ...settings.color, ...profile.color };
-		if (profile.performance) updates.performance = { ...settings.performance, ...profile.performance };
-		if (profile.wallpaperTheme) {
-			updates.wallpaper = { ...settings.wallpaper, currentTheme: profile.wallpaperTheme };
-		}
-
-		this.batchUpdate(updates);
-	}
-
-	deleteProfile(profileId: string): void {
-		this.update(settings => ({
-			...settings,
-			profiles: settings.profiles.filter(p => p.id !== profileId),
-			activeProfile: settings.activeProfile === profileId ? undefined : settings.activeProfile
-		}));
+		return profile;
 	}
 
 	// Import/Export functionality
 	exportSettings(includeProfiles = true, includeSearchEngines = true): string {
-		const settings = get(this.store);
+		const settings = this.get();
 		const exportData = { ...settings };
 
 		if (!includeProfiles) delete exportData.profiles;
 		if (!includeSearchEngines) {
-			exportData.searchEngines = exportData.searchEngines.filter(e => !e.isCustom);
+			exportData.searchEngines = exportData.searchEngines.filter((e) => !e.isCustom);
 		}
 
 		// Remove sensitive data
-		delete exportData.developer.apiEndpoint;
-		delete exportData.security;
-		delete exportData.sync;
+		delete (exportData.developer as any).apiEndpoint;
+		delete (exportData as any).security;
+		delete (exportData as any).sync;
 
 		return JSON.stringify(exportData, null, 2);
 	}
@@ -814,14 +813,13 @@ class SettingsStore {
 			const validated = this.validateSettings(migrated);
 
 			if (merge) {
-				const current = get(this.store);
+				const current = this.get();
 				const merged = this.mergeSettings(current, validated);
-				this.store.set(merged);
+				this.set(merged);
 			} else {
-				this.store.set(validated);
+				this.set(validated);
 			}
 
-			this.saveToStorage(get(this.store));
 			return true;
 		} catch (error) {
 			console.error('Failed to import settings:', error);
@@ -829,142 +827,65 @@ class SettingsStore {
 		}
 	}
 
-	// Backup and restore
-	createBackup(): void {
-		const settings = get(this.store);
-		const backup = {
-			timestamp: Date.now(),
-			version: settings.version,
-			settings: settings
-		};
-
-		try {
-			localStorage.setItem(this.backupKey, JSON.stringify(backup));
-		} catch (error) {
-			console.warn('Failed to create settings backup:', error);
-		}
-	}
-
-	loadBackup(): boolean {
-		try {
-			const backup = localStorage.getItem(this.backupKey);
-			if (backup) {
-				const parsed = JSON.parse(backup);
-				const validated = this.validateSettings(parsed.settings);
-				this.store.set(validated);
-				return true;
-			}
-		} catch (error) {
-			console.warn('Failed to load backup:', error);
-		}
-		
-		// Fall back to defaults
-		this.store.set({ ...DEFAULT_SETTINGS });
-		return false;
-	}
-
 	// Reset functionality
 	reset(section?: keyof Settings): void {
 		if (section) {
-			this.updatePartial(section, DEFAULT_SETTINGS[section] as any);
+			this.updateSetting(section, DEFAULT_SETTINGS[section]);
 		} else {
-			this.store.set({ ...DEFAULT_SETTINGS });
-			this.saveToStorage(DEFAULT_SETTINGS);
-			localStorage.removeItem(this.backupKey);
+			this.set({ ...DEFAULT_SETTINGS });
 		}
 	}
 
 	// Change listeners
-	addChangeListener(listener: (settings: Settings) => void): () => void {
-		this.changeListeners.add(listener);
-		return () => this.changeListeners.delete(listener);
+	addChangeListener(callback: (settings: Settings) => void): () => void {
+		this.changeListeners.add(callback);
+		return () => this.changeListeners.delete(callback);
 	}
 
-	private notifyChangeListeners(settings: Settings): void {
-		this.changeListeners.forEach(listener => {
-			try {
-				listener(settings);
-			} catch (error) {
-				console.warn('Settings change listener error:', error);
-			}
-		});
-	}
-
-	// Device capability detection
-	private async detectOptimalSettings(): Promise<Partial<Settings>> {
-		const capabilities = await this.detectDeviceCapabilities();
-		
-		return {
-			performance: {
-				...DEFAULT_SETTINGS.performance,
-				mode: capabilities.performance,
-				targetFPS: capabilities.targetFPS,
-				maxParticles: capabilities.maxParticles,
-				enableBlur: capabilities.enableBlur,
-				enableWebWorkers: capabilities.hasWebWorkers
-			},
-			ui: {
-				...DEFAULT_SETTINGS.ui,
-				animations: {
-					...DEFAULT_SETTINGS.ui.animations,
-					reduceMotion: capabilities.prefersReducedMotion
-				}
-			}
-		};
-	}
-
-	private async detectDeviceCapabilities() {
-		const canvas = document.createElement('canvas');
-		const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-		const devicePixelRatio = window.devicePixelRatio || 1;
-		const screenArea = window.innerWidth * window.innerHeight;
-		const memory = (navigator as any).deviceMemory || 4;
-		const cores = navigator.hardwareConcurrency || 4;
-
-		return {
-			hasWebGL: !!gl,
-			devicePixelRatio,
-			screenArea,
-			memory,
-			cores,
-			hasWebWorkers: typeof Worker !== 'undefined',
-			prefersReducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-			performance: memory >= 8 && cores >= 8 ? 'high' : memory >= 4 ? 'balanced' : 'low',
-			targetFPS: memory >= 8 ? 120 : 60,
-			maxParticles: Math.min(150, Math.floor(screenArea / 10000)),
-			enableBlur: memory >= 4 && !!gl
-		};
-	}
-
-	// Validation
-	private initializeValidationRules(): void {
-		this.validationRules.set('ui.fontSize', (value) => 
-			['xs', 'sm', 'base', 'lg', 'xl', '2xl'].includes(value)
+	// Private methods
+	private setupValidationRules(): void {
+		this.validationRules.set('particles.count', (value) => value >= 10 && value <= 500);
+		this.validationRules.set('ui.opacity', (value) => value >= 10 && value <= 100);
+		this.validationRules.set('objects3d.globalScale', (value) => value >= 0.1 && value <= 5.0);
+		this.validationRules.set('objects3d.animationSpeed', (value) => value >= 0.1 && value <= 10.0);
+		this.validationRules.set(
+			'objects3d.renderResolution',
+			(value) => value >= 0.25 && value <= 2.0
 		);
-		this.validationRules.set('performance.mode', (value) => 
-			['auto', 'high', 'balanced', 'low', 'custom'].includes(value)
-		);
-		this.validationRules.set('performance.targetFPS', (value) => 
-			typeof value === 'number' && value >= 30 && value <= 240
-		);
-		this.validationRules.set('particles.count', (value) => 
-			typeof value === 'number' && value >= 0 && value <= 500
-		);
-		// Add more validation rules as needed
+		this.validationRules.set('objects3d.maxActiveObjects', (value) => value >= 1 && value <= 200);
+		this.validationRules.set('performance.targetFPS', (value) => value >= 15 && value <= 120);
 	}
 
-	private validateSettings(settings: Settings): Settings {
-		const validated = { ...settings };
+	private validateSettings(settings: any): Settings {
+		// Deep validation of settings structure
+		const validated = { ...DEFAULT_SETTINGS, ...settings };
 
-		// Validate using rules
-		for (const [path, rule] of this.validationRules) {
+		// Validate specific fields using validation rules
+		for (const [path, validator] of this.validationRules.entries()) {
 			const value = this.getNestedValue(validated, path);
-			if (value !== undefined && !rule(value)) {
+			if (value !== undefined && !validator(value)) {
 				this.setNestedValue(validated, path, this.getNestedValue(DEFAULT_SETTINGS, path));
 			}
 		}
 
 		return validated;
+	}
+
+	private loadFromStorage(): void {
+		if (!browser) return;
+
+		try {
+			const stored = localStorage.getItem(this.storageKey);
+			if (stored) {
+				const parsed = JSON.parse(stored);
+				const migrated = this.migrateSettings(parsed);
+				const validated = this.validateSettings(migrated);
+				this.store.set(validated);
+			}
+		} catch (error) {
+			console.warn('Failed to load settings from storage:', error);
+			this.loadBackup();
+		}
 	}
 
 	private getNestedValue(obj: any, path: string): any {
@@ -978,47 +899,45 @@ class SettingsStore {
 		target[lastKey] = value;
 	}
 
-	// Settings migration
 	private migrateSettings(settings: any): Settings {
 		const migrated = { ...settings };
 
-		// Version 1 to 2 migration
+		// Version 1 to 2 migration (existing migration)
 		if (!migrated.migrationVersion || migrated.migrationVersion < 1) {
-			// Add new color settings
 			if (!migrated.color) {
 				migrated.color = DEFAULT_SETTINGS.color;
 			}
-			
-			// Add new accessibility settings
 			if (!migrated.accessibility) {
 				migrated.accessibility = DEFAULT_SETTINGS.accessibility;
 			}
-
-			// Migrate old performance settings
 			if (migrated.performance && !migrated.performance.monitoring) {
 				migrated.performance.monitoring = DEFAULT_SETTINGS.performance.monitoring;
 				migrated.performance.optimization = DEFAULT_SETTINGS.performance.optimization;
 			}
-
 			migrated.migrationVersion = 1;
+		}
+
+		// Version 2 migration - Add 3D settings
+		if (migrated.migrationVersion < 2) {
+			if (!migrated.objects3d) {
+				migrated.objects3d = DEFAULT_SETTINGS.objects3d;
+			}
+
+			// Migrate any existing 3D-related settings if they exist elsewhere
+			if (migrated.experimental?.enable3D !== undefined) {
+				migrated.objects3d.enabled = migrated.experimental.enable3D;
+				delete migrated.experimental?.enable3D;
+			}
+
+			// Update version info
+			migrated.version = '2.1.0';
+			migrated.migrationVersion = 2;
 		}
 
 		return migrated;
 	}
 
-	private migrateLegacySettings(legacy: any): Settings {
-		// Convert old settings format to new format
-		return {
-			...DEFAULT_SETTINGS,
-			...legacy,
-			version: DEFAULT_SETTINGS.version,
-			migrationVersion: 1,
-			lastUpdated: Date.now()
-		};
-	}
-
 	private mergeSettings(current: Settings, imported: Settings): Settings {
-		// Smart merge that preserves user customizations
 		return {
 			...current,
 			...imported,
@@ -1033,22 +952,21 @@ class SettingsStore {
 
 	private mergeSearchEngines(current: SearchEngine[], imported: SearchEngine[]): SearchEngine[] {
 		const merged = [...current];
-		
+
 		for (const engine of imported) {
-			const existingIndex = merged.findIndex(e => e.id === engine.id);
+			const existingIndex = merged.findIndex((e) => e.id === engine.id);
 			if (existingIndex >= 0) {
 				merged[existingIndex] = { ...merged[existingIndex], ...engine };
 			} else {
 				merged.push(engine);
 			}
 		}
-		
+
 		return merged;
 	}
 
-	// Auto-backup
 	private startAutoBackup(): void {
-		const settings = get(this.store);
+		const settings = this.get();
 		if (!settings.backup.autoBackup) return;
 
 		setInterval(() => {
@@ -1056,7 +974,38 @@ class SettingsStore {
 		}, settings.backup.backupInterval);
 	}
 
-	// Storage operations
+	private createBackup(): void {
+		const settings = this.get();
+		const backup = {
+			timestamp: Date.now(),
+			version: settings.version,
+			settings: settings
+		};
+
+		try {
+			localStorage.setItem(this.backupKey, JSON.stringify(backup));
+		} catch (error) {
+			console.warn('Failed to create settings backup:', error);
+		}
+	}
+
+	private loadBackup(): boolean {
+		try {
+			const backup = localStorage.getItem(this.backupKey);
+			if (backup) {
+				const parsed = JSON.parse(backup);
+				const validated = this.validateSettings(parsed.settings);
+				this.store.set(validated);
+				return true;
+			}
+		} catch (error) {
+			console.warn('Failed to load backup:', error);
+		}
+
+		this.store.set({ ...DEFAULT_SETTINGS });
+		return false;
+	}
+
 	private saveToStorage(settings: Settings): void {
 		if (!browser) return;
 
@@ -1067,16 +1016,26 @@ class SettingsStore {
 		}
 	}
 
-	// Cleanup
+	private notifyChangeListeners(settings: Settings): void {
+		for (const listener of this.changeListeners) {
+			try {
+				listener(settings);
+			} catch (error) {
+				console.error('Settings change listener error:', error);
+			}
+		}
+	}
+
 	destroy(): void {
 		this.changeListeners.clear();
 	}
 }
 
-// Create store instance
+// ===== STORE INSTANCES AND DERIVED STORES =====
+
 export const settingsStore = new SettingsStore();
 
-// Derived stores for easy access to specific sections
+// Section-specific derived stores
 export const keyboardSettings = derived(settingsStore, ($settings) => $settings.keyboard);
 export const particleSettings = derived(settingsStore, ($settings) => $settings.particles);
 export const wallpaperSettings = derived(settingsStore, ($settings) => $settings.wallpaper);
@@ -1085,32 +1044,67 @@ export const performanceSettings = derived(settingsStore, ($settings) => $settin
 export const colorSettings = derived(settingsStore, ($settings) => $settings.color);
 export const accessibilitySettings = derived(settingsStore, ($settings) => $settings.accessibility);
 export const developerSettings = derived(settingsStore, ($settings) => $settings.developer);
+export const objects3DSettings = derived(settingsStore, ($settings) => $settings.objects3d);
 
 // Computed derived stores
 export const isDebugMode = derived(settingsStore, ($settings) => $settings.developer.debugMode);
-export const isHighPerformanceMode = derived(settingsStore, ($settings) => $settings.performance.mode === 'high');
-export const shouldReduceMotion = derived(settingsStore, ($settings) => 
-	$settings.ui.animations.reduceMotion || $settings.accessibility.reduceMotion
+export const isHighPerformanceMode = derived(
+	settingsStore,
+	($settings) => $settings.performance.mode === 'high'
 );
-export const currentThemeProfile = derived(settingsStore, ($settings) => 
-	$settings.profiles.find(p => p.id === $settings.activeProfile)
+export const is3DEnabled = derived(settingsStore, ($settings) => $settings.objects3d.enabled);
+export const shouldReduceMotion = derived(
+	settingsStore,
+	($settings) => $settings.ui.animations.reduceMotion || $settings.accessibility.reduceMotion
 );
-export const defaultSearchEngine = derived(settingsStore, ($settings) => 
-	$settings.searchEngines.find(e => e.isDefault) || $settings.searchEngines[0]
+export const currentThemeProfile = derived(settingsStore, ($settings) =>
+	$settings.profiles.find((p) => p.id === $settings.activeProfile)
 );
+export const defaultSearchEngine = derived(
+	settingsStore,
+	($settings) => $settings.searchEngines.find((e) => e.isDefault) || $settings.searchEngines[0]
+);
+
+// 3D-specific computed stores
+export const effective3DSettings = derived(
+	[settingsStore, performanceSettings],
+	([$settings, $performance]) => {
+		const objects3d = $settings.objects3d;
+
+		// Auto-adjust 3D settings based on performance mode
+		if ($performance.mode === 'low') {
+			return {
+				...objects3d,
+				performanceMode: 'low' as Objects3DPerformanceMode,
+				enableAnimations: false,
+				enableGlow: false,
+				enableShadows: false
+			};
+		}
+
+		return objects3d;
+	}
+);
+
+export const threeDCompatibilityMode = derived([settingsStore], ([$settings]) => ({
+	webGLRequired: $settings.objects3d.enabled,
+	fallbackEnabled: $settings.objects3d.fallbackTo2D,
+	performanceMode: $settings.objects3d.performanceMode
+}));
 
 // Settings utilities
 export const createSettingsPreset = (name: string, overrides: Partial<Settings>): ThemeProfile => ({
 	id: `preset_${name.toLowerCase().replace(/\s+/g, '_')}`,
 	name,
 	description: `Preset: ${name}`,
-	version: '1.0.0',
+	version: '2.1.0',
 	author: 'System',
 	wallpaperTheme: overrides.wallpaper?.currentTheme || 'default',
 	particles: overrides.particles || {},
 	ui: overrides.ui || {},
 	color: overrides.color || {},
 	performance: overrides.performance || {},
+	objects3d: overrides.objects3d || {},
 	isBuiltIn: true,
 	isActive: false,
 	createdAt: Date.now(),

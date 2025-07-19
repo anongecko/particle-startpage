@@ -5,9 +5,13 @@
 	import { cubicOut, backOut, sineInOut } from 'svelte/easing';
 	import type { BookmarkCategory, BookmarkItem } from '$stores/bookmarks';
 	import { bookmarkStore } from '$stores/bookmarks';
-	import { settingsStore } from '$stores/settings';
+	import { settingsStore, objects3DSettings } from '$stores/settings';
 	import { ThreeRenderer } from '$lib/three-renderer';
-	import { OBJECT_REGISTRY, getObjectById } from '$lib/objects';
+	
+	// ✅ FIXED: Updated imports for new 3D system
+	import { Object3DRegistry, getAllObjects, getObject } from '$lib/objects3d';
+	import { OBJECT_CATEGORIES } from '$lib/objects';
+	
 	import Object3D from './Object3D.svelte';
 	import ContextMenu from './ContextMenu.svelte';
 	import ObjectSelector from './ObjectSelector.svelte';
@@ -37,6 +41,15 @@
 	let hoveredCategoryId: string | null = null;
 	let keyboardFocusIndex = -1;
 	let showEmptyToast = false;
+	
+	// Category state management
+	let categoryStates = new Map<string, {
+		isOpen: boolean;
+		isHovered: boolean;
+		animating: boolean;
+		object3DError: boolean;
+		lastInteraction: number;
+	}>();
 	
 	// Touch handling
 	let touchStartTime = 0;
@@ -79,122 +92,89 @@
 		visibleCategories.some((cat: BookmarkCategory) => cat.bookmarks.length > 0);
 	$: bookmarkSize = settings?.ui?.bookmarkSize || 1;
 	$: folderSize = settings?.ui?.folderSize || 1;
-	$: enable3D = settings?.enable3DObjects !== false && 
+	$: enable3D = settings?.objects3d?.enabled !== false && 
 		webGLSupported && 
 		webGLInitialized && 
 		config?.enable3D !== false;
 	
 	// Enhanced grid configuration with responsive design
 	$: gridConfig = calculateGridConfig(folderSize);
-	$: textColor = getContrastColor($colorTransition);
+	$: textColor = getContrastColor(dominantColor);
 	
-	// Category state management
-	interface CategoryState {
-		id: string;
-		isOpen: boolean;
-		isHovered: boolean;
-		dropdownHeight: number;
-		animating: boolean;
-		object3DLoaded: boolean;
-		object3DError: boolean;
-		lastInteraction: number;
-	}
-	
-	let categoryStates = new Map<string, CategoryState>();
-	
-	// Set up Three.js context for child components
-	$: {
-		setContext('threeRenderer', threeRenderer);
-		setContext('webGLSupported', webGLSupported);
-		setContext('threeDConfig', {
-			...config,
-			enable3D,
-			performanceLevel,
-			fallbackTo2D: true
-		});
-	}
-	
-	// Performance calculation
-	function calculateGridConfig(folderSize: number) {
-		const windowWidth = globalThis.window?.innerWidth || 1200;
-		const baseWidth = 120 * folderSize;
-		const gap = Math.max(20, 24 * folderSize);
-		const maxColumns = Math.min(8, Math.max(2, Math.floor(windowWidth / (baseWidth + gap))));
-		
-		return {
-			minColumnWidth: baseWidth,
-			gap,
-			maxColumns,
-			itemsPerRow: Math.min(maxColumns, visibleCategories.length)
-		};
-	}
-	
-	// Enhanced performance monitoring
-	function trackPerformance(): void {
-		const now = performance.now();
-		frameCount++;
-		
-		if (now - lastFrameTime >= 1000) {
-			currentFPS = Math.round((frameCount * 1000) / (now - lastFrameTime));
-			frameCount = 0;
-			lastFrameTime = now;
-			
-			// Auto-adjust performance level
-			if (currentFPS < 30 && performanceLevel !== 'low') {
-				performanceLevel = currentFPS < 20 ? 'low' : 'medium';
-				console.log(`Performance auto-adjusted to: ${performanceLevel}`);
-			} else if (currentFPS > 55 && performanceLevel === 'low') {
-				performanceLevel = 'medium';
-			} else if (currentFPS > 75 && performanceLevel === 'medium') {
-				performanceLevel = 'high';
-			}
-		}
-		
-		if (browser) {
-			requestAnimationFrame(trackPerformance);
-		}
+	// Watch for color changes and update Three.js renderer
+	$: if (threeRenderer && dominantColor) {
+		colorTransition.set(dominantColor);
+		threeRenderer.updateWallpaperColors(dominantColor);
 	}
 	
 	// Initialize category states
 	function initializeCategoryStates(): void {
-		const now = Date.now();
-		categoryStates.clear();
-		
-		for (const category of visibleCategories) {
-			categoryStates.set(category.id, {
-				id: category.id,
-				isOpen: false,
-				isHovered: false,
-				dropdownHeight: 0,
-				animating: false,
-				object3DLoaded: false,
-				object3DError: false,
-				lastInteraction: now
-			});
-		}
-		
-		// Trigger reactivity
+		visibleCategories.forEach(category => {
+			if (!categoryStates.has(category.id)) {
+				categoryStates.set(category.id, {
+					isOpen: false,
+					isHovered: false,
+					animating: false,
+					object3DError: false,
+					lastInteraction: 0
+				});
+			}
+		});
 		categoryStates = new Map(categoryStates);
 	}
 	
-	// Update category state with batching
-	function updateCategoryState(categoryId: string, updates: Partial<CategoryState>): void {
-		const current = categoryStates.get(categoryId);
-		if (!current) return;
-		
-		const newState = { 
-			...current, 
-			...updates, 
-			lastInteraction: Date.now() 
+	function updateCategoryState(categoryId: string, updates: Partial<typeof categoryStates extends Map<string, infer T> ? T : never>): void {
+		const current = categoryStates.get(categoryId) || {
+			isOpen: false,
+			isHovered: false,
+			animating: false,
+			object3DError: false,
+			lastInteraction: 0
 		};
 		
-		categoryStates.set(categoryId, newState);
+		categoryStates.set(categoryId, { ...current, ...updates });
 		categoryStates = new Map(categoryStates);
 	}
 	
-	// Enhanced Three.js initialization with error handling
+	// Grid configuration calculation
+	function calculateGridConfig(folderSize: number) {
+		const baseSize = 100 * folderSize;
+		const minSpacing = 20;
+		const maxColumns = Math.floor((window?.innerWidth || 1200) / (baseSize + minSpacing));
+		
+		return {
+			maxColumns: Math.max(2, Math.min(8, maxColumns)),
+			itemSize: baseSize,
+			spacing: minSpacing
+		};
+	}
+	
+	// Performance tracking
+	function trackPerformance(): void {
+		const currentTime = performance.now();
+		const deltaTime = currentTime - lastFrameTime;
+		frameCount++;
+		
+		if (deltaTime > 1000) { // Update every second
+			currentFPS = Math.round((frameCount * 1000) / deltaTime);
+			frameCount = 0;
+			lastFrameTime = currentTime;
+			
+			// Adjust performance level based on FPS
+			if (currentFPS < 30 && performanceLevel !== 'low') {
+				performanceLevel = 'low';
+				console.log('Performance adjusted to low due to low FPS:', currentFPS);
+			} else if (currentFPS > 50 && performanceLevel !== 'high') {
+				performanceLevel = 'high';
+			}
+		}
+		
+		requestAnimationFrame(trackPerformance);
+	}
+	
+	// Three.js initialization
 	async function initializeThreeJS(): Promise<void> {
-		if (!browser || !threeCanvas || !enable3D) return;
+		if (!browser || !threeCanvas) return;
 		
 		try {
 			console.log('Initializing Three.js renderer...');
@@ -307,172 +287,117 @@
 		
 		// Update analytics
 		try {
-			bookmarkStore.updateCategoryAnalytics?.(category.id, { totalClicks: 1 });
+			bookmarkStore.updateCategoryAnalytics?.(category.id, { 
+				totalClicks: 1 
+			});
 		} catch (error) {
-			console.warn('Failed to update category analytics:', error);
+			console.warn('Failed to update analytics:', error);
 		}
 		
-		dispatch('interact', { type: 'categoryClick', categoryId: category.id });
+		dispatch('category-click', { category, wasOpen });
 	}
 	
-	// Optimized category opening with smooth animations
 	async function openCategory(categoryId: string): Promise<void> {
-		const category = visibleCategories.find(c => c.id === categoryId);
-		if (!category) return;
-		
-		openCategoryId = categoryId;
 		updateCategoryState(categoryId, { isOpen: true, animating: true });
+		openCategoryId = categoryId;
 		
-		// Calculate optimal dropdown height
-		const itemHeight = Math.max(44, 48 * bookmarkSize);
-		const padding = 16;
-		const maxViewportHeight = (globalThis.window?.innerHeight || 800) * 0.4;
-		const calculatedHeight = Math.min(
-			maxViewportHeight,
-			category.bookmarks.length * itemHeight + padding * 2
-		);
-		
-		// Smooth height animation
-		updateCategoryState(categoryId, { dropdownHeight: calculatedHeight });
-		
-		// Wait for animation completion
+		// Wait for animation
 		await new Promise(resolve => setTimeout(resolve, 300));
 		updateCategoryState(categoryId, { animating: false });
+		
+		dispatch('category-open', { categoryId });
 	}
 	
-	// Optimized category closing
 	async function closeCategory(categoryId: string): Promise<void> {
 		updateCategoryState(categoryId, { animating: true });
-		updateCategoryState(categoryId, { dropdownHeight: 0 });
 		
-		await new Promise(resolve => setTimeout(resolve, 250));
+		// Wait for animation
+		await new Promise(resolve => setTimeout(resolve, 200));
 		
-		updateCategoryState(categoryId, { 
-			isOpen: false, 
-			animating: false,
-			dropdownHeight: 0 
-		});
+		updateCategoryState(categoryId, { isOpen: false, animating: false });
 		
 		if (openCategoryId === categoryId) {
 			openCategoryId = null;
 		}
-	}
-	
-	// Enhanced hover handling with debouncing
-	let hoverDebounceTimer: NodeJS.Timeout | null = null;
-	
-	function handleCategoryHover(category: BookmarkCategory, isHovered: boolean, event?: MouseEvent): void {
-		// Clear existing timer
-		if (hoverDebounceTimer) {
-			clearTimeout(hoverDebounceTimer);
-		}
 		
-		// Debounce hover events for performance
-		hoverDebounceTimer = setTimeout(() => {
-			hoveredCategoryId = isHovered ? category.id : null;
-			updateCategoryState(category.id, { isHovered });
-			
-			// Emit particle interaction event with throttling
-			if (event && isHovered) {
-				const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-				const centerX = rect.left + rect.width / 2;
-				const centerY = rect.top + rect.height / 2;
-				
-				window.dispatchEvent(new CustomEvent('bookmark-hover', {
-					detail: {
-						categoryId: category.id,
-						action: 'start',
-						position: { x: centerX, y: centerY },
-						effects: category.hoverEffects || {}
-					}
-				}));
-			} else if (!isHovered) {
-				window.dispatchEvent(new CustomEvent('bookmark-hover', {
-					detail: { action: 'end' }
-				}));
-			}
-			
-			dispatch('interact', { type: 'categoryHover', categoryId: category.id, isHovered });
-		}, isHovered ? 50 : 100); // Faster on hover enter, slower on leave
+		dispatch('category-close', { categoryId });
 	}
 	
-	// Enhanced touch handling
+	// Right-click context menu
+	function handleRightClick(category: BookmarkCategory, event: MouseEvent): void {
+		event.preventDefault();
+		event.stopPropagation();
+		
+		contextMenuX = event.clientX;
+		contextMenuY = event.clientY;
+		contextMenuCategory = category;
+		contextMenuVisible = true;
+	}
+	
+	// Touch handling for mobile
 	function handleTouchStart(category: BookmarkCategory, event: TouchEvent): void {
 		touchStartTime = Date.now();
 		
-		// Long press detection for context menu
+		// Long press for context menu
 		longPressTimer = setTimeout(() => {
-			if (Date.now() - touchStartTime >= 500) {
+			if (touchStartTime > 0) { // Still touching
 				const touch = event.touches[0];
-				if (touch) {
-					handleRightClick(category, {
-						preventDefault: () => {},
-						stopPropagation: () => {},
-						clientX: touch.clientX,
-						clientY: touch.clientY
-					} as MouseEvent);
-					
-					// Haptic feedback
-					if ('vibrate' in navigator) {
-						navigator.vibrate(50);
-					}
-				}
+				handleRightClick(category, {
+					preventDefault: () => {},
+					stopPropagation: () => {},
+					clientX: touch.clientX,
+					clientY: touch.clientY
+				} as MouseEvent);
 			}
 		}, 500);
 	}
 	
 	function handleTouchEnd(category: BookmarkCategory, event: TouchEvent): void {
-		// Clear long press timer
+		const touchDuration = Date.now() - touchStartTime;
+		touchStartTime = 0;
+		
 		if (longPressTimer) {
 			clearTimeout(longPressTimer);
 			longPressTimer = null;
 		}
 		
-		const touchDuration = Date.now() - touchStartTime;
-		const timeSinceLastTap = Date.now() - lastTapTime;
-		
-		if (touchDuration < 500) { // Not a long press
+		// Handle tap
+		if (touchDuration < 500) {
+			const currentTime = Date.now();
+			const timeSinceLastTap = currentTime - lastTapTime;
+			
 			if (timeSinceLastTap < 300) {
-				// Double tap - quick action
+				// Double tap - open category
 				handleCategoryClick(category, new MouseEvent('click'));
-			} else {
-				// Single tap with delay detection
-				setTimeout(() => {
-					if (Date.now() - lastTapTime >= 300) {
-						handleCategoryClick(category, new MouseEvent('click'));
-					}
-				}, 300);
 			}
-			lastTapTime = Date.now();
+			
+			lastTapTime = currentTime;
 		}
 	}
 	
-	// Context menu handling
-	function handleRightClick(category: BookmarkCategory, event: MouseEvent): void {
-		event.preventDefault();
-		event.stopPropagation();
+	// Hover handling
+	function handleCategoryHover(category: BookmarkCategory, isHovering: boolean): void {
+		updateCategoryState(category.id, { 
+			isHovered: isHovering,
+			lastInteraction: Date.now()
+		});
 		
-		contextMenuCategory = category;
-		contextMenuX = event.clientX;
-		contextMenuY = event.clientY;
-		contextMenuVisible = true;
-		
-		dispatch('interact', { type: 'contextMenu', categoryId: category.id });
+		if (isHovering) {
+			hoveredCategoryId = category.id;
+		} else if (hoveredCategoryId === category.id) {
+			hoveredCategoryId = null;
+		}
 	}
 	
-	// 3D object event handlers
-	function handleObject3DHover(event: CustomEvent): void {
-		const { category, position } = event.detail;
-		handleCategoryHover(category, true, { 
-			currentTarget: event.target,
-			clientX: position?.x || 0,
-			clientY: position?.y || 0
-		} as MouseEvent);
-	}
-	
+	// Enhanced Object3D event handlers
 	function handleObject3DClick(event: CustomEvent): void {
 		const { category } = event.detail;
-		handleCategoryClick(category, event.detail.event || new MouseEvent('click'));
+		handleCategoryClick(category, new MouseEvent('click'));
+	}
+	
+	function handleObject3DHover(event: CustomEvent): void {
+		const { category, isHovering } = event.detail;
+		handleCategoryHover(category, isHovering);
 	}
 	
 	function handleObject3DContextMenu(event: CustomEvent): void {
@@ -715,14 +640,15 @@
 		return iconMap[category.objectId || category.iconId || ''] || '📁';
 	}
 	
+	// ✅ FIXED: Updated to use new 3D system API
 	function shouldUse3D(category: BookmarkCategory): boolean {
 		if (!enable3D || !category.objectId) return false;
 		
 		const state = categoryStates.get(category.id);
 		if (state?.object3DError) return false;
 		
-		// Check if object exists in registry
-		const objectConfig = getObjectById(category.objectId);
+		// ✅ FIXED: Use Object3DRegistry.getObject instead of getObjectById
+		const objectConfig = Object3DRegistry.getObject(category.objectId);
 		if (!objectConfig) return false;
 		
 		// Check if category is in viewport
@@ -734,6 +660,9 @@
 		if (!browser) return;
 		
 		console.log('BookmarkGrid mounting...');
+		
+		// ✅ FIXED: Initialize Object3D registry
+		await Object3DRegistry.initialize();
 		
 		// Initialize state
 		initializeCategoryStates();
@@ -757,80 +686,43 @@
 		}
 		
 		console.log('BookmarkGrid mounted successfully');
-		
-		// Cleanup function
-		return () => {
-			document.removeEventListener('keydown', handleKeyDown);
-			document.removeEventListener('click', handleClickOutside);
-			
-			if (intersectionObserver) {
-				intersectionObserver.disconnect();
-			}
-			
-			if (hoverDebounceTimer) {
-				clearTimeout(hoverDebounceTimer);
-			}
-			
-			if (longPressTimer) {
-				clearTimeout(longPressTimer);
-			}
-		};
 	});
 	
 	onDestroy(() => {
-		if (!browser) return;
-		
-		console.log('BookmarkGrid destroying...');
+		// Cleanup Three.js
+		if (threeRenderer) {
+			threeRenderer.dispose();
+		}
 		
 		// Cleanup event listeners
 		document.removeEventListener('keydown', handleKeyDown);
 		document.removeEventListener('click', handleClickOutside);
 		
-		// Cleanup observers
+		// Cleanup intersection observer
 		if (intersectionObserver) {
 			intersectionObserver.disconnect();
 		}
 		
-		// Cleanup timers
-		if (hoverDebounceTimer) {
-			clearTimeout(hoverDebounceTimer);
-		}
-		
+		// Clear timers
 		if (longPressTimer) {
 			clearTimeout(longPressTimer);
-		}
-		
-		// Cleanup Three.js renderer
-		if (threeRenderer) {
-			threeRenderer.dispose();
-			threeRenderer = null;
 		}
 		
 		console.log('BookmarkGrid destroyed');
 	});
 	
-	// Reactive updates
-	$: if (dominantColor) {
-		colorTransition.set(dominantColor);
-		if (threeRenderer) {
-			threeRenderer.updateWallpaperColors(dominantColor);
+	// Svelte action for intersection observer
+	function intersectionObserver(element: HTMLElement) {
+		if (intersectionObserver) {
+			intersectionObserver.observe(element);
 		}
-	}
-	
-	$: if (visibleCategories) {
-		initializeCategoryStates();
-	}
-	
-	// Expose debug info in development
-	$: if (import.meta.env.DEV) {
-		globalThis.bookmarkGridDebug = {
-			categoryStates,
-			visibleCategories3D,
-			threeRenderer,
-			webGLSupported,
-			webGLInitialized,
-			performanceLevel,
-			currentFPS
+		
+		return {
+			destroy() {
+				if (intersectionObserver) {
+					intersectionObserver.unobserve(element);
+				}
+			}
 		};
 	}
 </script>
@@ -838,23 +730,12 @@
 <div 
 	class="bookmark-grid-container"
 	bind:this={gridContainer}
-	style="
-		--dominant-color: {$colorTransition};
-		--text-color: {textColor};
-		--folder-size: {folderSize};
-		--bookmark-size: {bookmarkSize};
-		--grid-gap: {gridConfig.gap}px;
-		--min-column-width: {gridConfig.minColumnWidth}px;
-		--performance-level: {performanceLevel};
-	"
-	role="main"
-	aria-label="Bookmark categories"
+	style="--text-color: {textColor}; --grid-scale: {$gridScale};"
 >
-	<!-- Shared Three.js Canvas (positioned absolutely) -->
-	{#if webGLSupported && enable3D}
-		<canvas 
+	<!-- Three.js Canvas for shared 3D rendering -->
+	{#if enable3D}
+		<canvas
 			bind:this={threeCanvas}
-			class="three-canvas"
 			style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: -1;"
 			aria-hidden="true"
 		></canvas>
@@ -922,68 +803,46 @@
 							class:empty={isEmpty}
 							class:webgl-fallback={!webGLSupported || state?.object3DError}
 							class:performance-reduced={performanceLevel === 'low'}
-							tabindex="0"
-							role="button"
-							aria-label="{category.name} bookmarks ({category.bookmarks.length} items)"
-							aria-expanded={state?.isOpen}
-							aria-haspopup="true"
+							style="transform: scale({folderSize});"
 							on:click={(e) => handleCategoryClick(category, e)}
-							on:mouseenter={(e) => handleCategoryHover(category, true, e)}
-							on:mouseleave={() => handleCategoryHover(category, false)}
 							on:contextmenu={(e) => handleRightClick(category, e)}
+							on:mouseenter={() => handleCategoryHover(category, true)}
+							on:mouseleave={() => handleCategoryHover(category, false)}
 							on:touchstart={(e) => handleTouchStart(category, e)}
 							on:touchend={(e) => handleTouchEnd(category, e)}
-							on:focus={() => keyboardFocusIndex = index}
+							role="button"
+							tabindex="0"
+							aria-label="Open {category.name} folder"
+							aria-expanded={state?.isOpen}
 						>
-							<div class="folder-object">
-								<div class="folder-face folder-front">
-									<span class="folder-icon" aria-hidden="true">
-										{getCategoryIcon(category)}
-									</span>
-									<span class="folder-label">
-										{category.name}
-									</span>
-									{#if category.bookmarks.length > 0}
-										<span class="folder-count" aria-label="{category.bookmarks.length} bookmarks">
-											{category.bookmarks.length}
-										</span>
-									{/if}
-								</div>
-								<div class="folder-face folder-top"></div>
-								<div class="folder-face folder-right"></div>
+							<div class="folder-icon">
+								{getCategoryIcon(category)}
 							</div>
-							
-							<!-- Enhanced breathing glow effect -->
-							<div class="folder-glow" aria-hidden="true"></div>
+							<div class="folder-glow" style="background: {category.customColor || dominantColor};"></div>
+							<div class="folder-name">{category.name}</div>
+							{#if category.bookmarks.length > 0}
+								<div class="bookmark-count">{category.bookmarks.length}</div>
+							{/if}
 						</div>
 					{/if}
 					
-					<!-- Enhanced Dropdown Content -->
-					{#if state?.isOpen}
-						<div 
-							class="bookmark-dropdown"
-							style="height: {state.dropdownHeight}px;"
-							role="menu"
-							aria-label="{category.name} bookmarks"
-						>
-							<div class="dropdown-content">
+					<!-- Bookmark dropdown (only when open) -->
+					{#if state?.isOpen && category.bookmarks.length > 0}
+						<div class="bookmark-dropdown" class:animating={state?.animating}>
+							<div class="bookmark-list">
 								{#each category.bookmarks as bookmark (bookmark.id)}
-									<button
+									<button 
 										class="bookmark-item"
-										role="menuitem"
-										aria-label="Open {bookmark.title}"
 										on:click={(e) => handleBookmarkClick(bookmark, e)}
+										title="{bookmark.title} - {bookmark.url}"
 									>
-										<div class="bookmark-icon">
+										<div class="bookmark-favicon">
 											{#if bookmark.favicon}
-												<img 
-													src={bookmark.favicon} 
-													alt="" 
-													loading="lazy"
-													onerror="this.style.display='none'"
-												/>
+												<img src={bookmark.favicon} alt="" aria-hidden="true" />
+											{:else if bookmark.customIcon}
+												<span class="custom-icon" aria-hidden="true">{bookmark.customIcon}</span>
 											{:else}
-												<span class="bookmark-fallback" aria-hidden="true">🔗</span>
+												<span class="default-favicon" aria-hidden="true">🔗</span>
 											{/if}
 										</div>
 										<div class="bookmark-info">
@@ -1065,37 +924,120 @@
 {/if}
 
 <style>
-	/* Performance-optimized base styles */
 	.bookmark-grid-container {
 		position: relative;
 		width: 100%;
-		max-width: 1400px;
-		margin: 0 auto;
-		padding: 0 clamp(16px, 4vw, 40px);
-		overflow: visible;
-		contain: layout style;
+		height: 100%;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding: 2rem;
+		transition: transform 0.3s ease;
+		transform: scale(var(--grid-scale, 1));
 	}
 	
-	.three-canvas {
-		position: absolute !important;
-		top: 0;
-		left: 0;
-		width: 100%;
-		height: 100%;
-		pointer-events: none;
-		z-index: -1;
-		will-change: auto;
+	.empty-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		max-width: 400px;
+		margin: 0 auto;
+		opacity: 0;
+		animation: fadeInUp 0.6s ease forwards;
+	}
+	
+	.empty-folder {
+		margin-bottom: 2rem;
+		position: relative;
+		transform-style: preserve-3d;
+		transition: all 0.4s ease;
+	}
+	
+	.empty-folder.faded {
+		opacity: 0.7;
+		filter: grayscale(0.3);
+	}
+	
+	.folder-object {
+		position: relative;
+		width: 80px;
+		height: 80px;
+		transform-style: preserve-3d;
+		animation: gentleFloat 4s ease-in-out infinite;
+	}
+	
+	.folder-face {
+		position: absolute;
+		width: 80px;
+		height: 80px;
+		background: var(--text-color, #ffffff);
+		border-radius: 8px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 2rem;
+		opacity: 0.8;
+	}
+	
+	.folder-front {
+		transform: translateZ(20px);
+	}
+	
+	.folder-top {
+		transform: rotateX(90deg) translateZ(20px);
+		background: rgba(255, 255, 255, 0.3);
+	}
+	
+	.folder-right {
+		transform: rotateY(90deg) translateZ(60px);
+		background: rgba(255, 255, 255, 0.2);
+		width: 40px;
+	}
+	
+	.empty-title {
+		font-size: 1.5rem;
+		font-weight: 600;
+		color: var(--text-color, #ffffff);
+		margin: 0 0 1rem 0;
+	}
+	
+	.empty-message {
+		font-size: 1rem;
+		color: var(--text-color, #ffffff);
+		opacity: 0.8;
+		margin: 0 0 2rem 0;
+		line-height: 1.5;
+	}
+	
+	.empty-action-button {
+		padding: 0.75rem 1.5rem;
+		background: rgba(255, 255, 255, 0.2);
+		border: 1px solid rgba(255, 255, 255, 0.3);
+		border-radius: 8px;
+		color: var(--text-color, #ffffff);
+		font-size: 0.9rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 0.3s ease;
+		backdrop-filter: blur(10px);
+	}
+	
+	.empty-action-button:hover {
+		background: rgba(255, 255, 255, 0.3);
+		border-color: rgba(255, 255, 255, 0.5);
+		transform: translateY(-2px);
 	}
 	
 	.bookmark-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(var(--min-column-width), 1fr));
-		gap: var(--grid-gap);
-		align-items: start;
-		justify-content: center;
-		position: relative;
-		z-index: 1;
-		contain: layout;
+		grid-template-columns: repeat(var(--columns, 4), 1fr);
+		gap: 2rem;
+		max-width: 1200px;
+		width: 100%;
+		place-items: center;
 	}
 	
 	.bookmark-category {
@@ -1103,414 +1045,264 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		z-index: 2;
-		contain: layout style;
-		animation: slideIn 0.3s ease-out calc(var(--category-index) * 50ms);
+		transition: all 0.3s ease;
+		animation: categoryFadeIn 0.5s ease forwards;
+		animation-delay: calc(var(--category-index, 0) * 0.1s);
+		opacity: 0;
 	}
 	
-	@keyframes slideIn {
-		from {
-			opacity: 0;
-			transform: translateY(20px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
+	.bookmark-category.focused {
+		outline: 2px solid rgba(255, 255, 255, 0.5);
+		outline-offset: 4px;
+		border-radius: 12px;
 	}
 	
-	/* Enhanced folder styling */
 	.bookmark-folder {
 		position: relative;
+		width: 100px;
+		height: 100px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
 		cursor: pointer;
-		perspective: 1000px;
+		border-radius: 16px;
+		transition: all 0.3s ease;
 		transform-style: preserve-3d;
-		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-		margin-bottom: 12px;
-		z-index: 3;
-		contain: layout style;
-		will-change: transform;
+		background: rgba(255, 255, 255, 0.1);
+		backdrop-filter: blur(10px);
+		border: 1px solid rgba(255, 255, 255, 0.2);
 	}
 	
-	.bookmark-folder:focus-visible {
-		outline: 2px solid var(--dominant-color);
-		outline-offset: 4px;
-		border-radius: 8px;
+	.bookmark-folder:hover {
+		transform: translateY(-4px) scale(1.05);
+		background: rgba(255, 255, 255, 0.15);
+		border-color: rgba(255, 255, 255, 0.3);
 	}
 	
 	.bookmark-folder.hovered {
-		transform: translateY(-8px) rotateX(5deg) rotateY(-2deg) scale(1.05);
+		transform: translateY(-6px) scale(1.1);
+		box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
 	}
 	
 	.bookmark-folder.empty {
-		opacity: 0.3;
-		filter: grayscale(0.8);
-	}
-	
-	.bookmark-folder.performance-reduced.hovered {
-		transform: translateY(-4px) scale(1.03);
+		opacity: 0.7;
+		border-style: dashed;
 	}
 	
 	.bookmark-folder.webgl-fallback {
-		filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.3));
+		border: 2px solid rgba(255, 193, 7, 0.5);
 	}
 	
-	.bookmark-folder.webgl-fallback.hovered {
-		transform: translateY(-12px) rotateX(8deg) rotateY(-4deg) scale(1.1);
-		filter: drop-shadow(0 12px 24px rgba(0, 0, 0, 0.4));
-	}
-	
-	.folder-object {
-		position: relative;
-		width: calc(80px * var(--folder-size));
-		height: calc(60px * var(--folder-size));
-		transform-style: preserve-3d;
-		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-		contain: layout;
-	}
-	
-	.folder-face {
-		position: absolute;
-		border-radius: 8px;
-		background: linear-gradient(135deg, 
-			var(--dominant-color), 
-			color-mix(in srgb, var(--dominant-color) 80%, black)
-		);
-		border: 1px solid color-mix(in srgb, var(--dominant-color) 70%, white);
-		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-	}
-	
-	.folder-front {
-		width: 100%;
-		height: 100%;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 2px;
-		transform: translateZ(calc(15px * var(--folder-size)));
-		padding: 4px;
-	}
-	
-	.folder-top {
-		width: 100%;
-		height: calc(15px * var(--folder-size));
-		top: calc(-15px * var(--folder-size));
-		transform: rotateX(90deg);
-		transform-origin: bottom;
-		background: linear-gradient(180deg, 
-			color-mix(in srgb, var(--dominant-color) 90%, white),
-			var(--dominant-color)
-		);
-	}
-	
-	.folder-right {
-		width: calc(15px * var(--folder-size));
-		height: 100%;
-		right: calc(-15px * var(--folder-size));
-		transform: rotateY(90deg);
-		transform-origin: left;
-		background: linear-gradient(90deg, 
-			var(--dominant-color),
-			color-mix(in srgb, var(--dominant-color) 70%, black)
-		);
+	.bookmark-folder.performance-reduced {
+		transition: none;
+		transform: none !important;
 	}
 	
 	.folder-icon {
-		font-size: calc(20px * var(--folder-size));
-		line-height: 1;
-		filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+		font-size: 2rem;
+		margin-bottom: 0.5rem;
+		transition: transform 0.3s ease;
 	}
 	
-	.folder-label {
-		font-size: calc(9px * var(--folder-size));
-		font-weight: 600;
-		color: var(--text-color);
-		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+	.bookmark-folder:hover .folder-icon {
+		transform: scale(1.1) rotateY(15deg);
+	}
+	
+	.folder-glow {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		border-radius: 16px;
+		opacity: 0;
+		transition: opacity 0.3s ease;
+		pointer-events: none;
+		filter: blur(20px);
+		z-index: -1;
+	}
+	
+	.bookmark-folder:hover .folder-glow {
+		opacity: 0.3;
+	}
+	
+	.folder-name {
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--text-color, #ffffff);
 		text-align: center;
-		max-width: 100%;
+		max-width: 80px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		line-height: 1.1;
 	}
 	
-	.folder-count {
-		font-size: calc(7px * var(--folder-size));
-		background: rgba(255, 255, 255, 0.2);
-		color: var(--text-color);
-		padding: 1px 4px;
-		border-radius: 6px;
-		font-weight: 500;
-		text-shadow: none;
-	}
-	
-	/* Enhanced glow effect */
-	.folder-glow {
+	.bookmark-count {
 		position: absolute;
-		top: -20%;
-		left: -20%;
-		right: -20%;
-		bottom: -20%;
-		background: radial-gradient(circle, 
-			color-mix(in srgb, var(--dominant-color) 30%, transparent) 0%,
-			transparent 70%
-		);
+		top: -8px;
+		right: -8px;
+		background: rgba(255, 255, 255, 0.9);
+		color: #333;
 		border-radius: 50%;
-		opacity: 0.6;
-		animation: breathing-glow 4s ease-in-out infinite;
-		z-index: -1;
-		will-change: opacity, transform;
+		width: 20px;
+		height: 20px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.7rem;
+		font-weight: 600;
+		border: 2px solid rgba(255, 255, 255, 0.3);
 	}
 	
-	.bookmark-folder.hovered .folder-glow {
-		opacity: 1;
-		animation: none;
-		background: radial-gradient(circle, 
-			color-mix(in srgb, var(--dominant-color) 50%, transparent) 0%,
-			transparent 70%
-		);
-	}
-	
-	@keyframes breathing-glow {
-		0%, 100% { 
-			opacity: 0.3; 
-			transform: scale(0.9);
-		}
-		50% { 
-			opacity: 0.6; 
-			transform: scale(1.1);
-		}
-	}
-	
-	/* Enhanced dropdown */
 	.bookmark-dropdown {
-		width: 100%;
-		max-width: min(320px, 90vw);
-		background: rgba(0, 0, 0, 0.92);
+		position: absolute;
+		top: 110px;
+		left: 50%;
+		transform: translateX(-50%);
+		background: rgba(255, 255, 255, 0.95);
 		backdrop-filter: blur(20px);
 		border-radius: 12px;
-		border: 1px solid color-mix(in srgb, var(--dominant-color) 30%, transparent);
+		border: 1px solid rgba(255, 255, 255, 0.3);
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+		min-width: 280px;
+		max-width: 400px;
+		max-height: 300px;
 		overflow: hidden;
-		transition: height 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-		box-shadow: 
-			0 8px 32px rgba(0, 0, 0, 0.3),
-			0 0 0 1px rgba(255, 255, 255, 0.05);
 		z-index: 10;
-		position: relative;
-		contain: layout;
+		opacity: 0;
+		animation: dropdownFadeIn 0.3s ease forwards;
 	}
 	
-	.dropdown-content {
-		max-height: calc(100% - 40px);
+	.bookmark-dropdown.animating {
+		opacity: 0;
+		transform: translateX(-50%) translateY(-10px);
+	}
+	
+	.bookmark-list {
+		max-height: 240px;
 		overflow-y: auto;
-		padding: 8px;
-		overscroll-behavior: contain;
+		padding: 0.5rem;
 	}
 	
 	.bookmark-item {
+		width: 100%;
 		display: flex;
 		align-items: center;
-		gap: 12px;
-		width: 100%;
-		padding: calc(8px * var(--bookmark-size));
-		background: transparent;
+		gap: 0.75rem;
+		padding: 0.75rem;
 		border: none;
+		background: none;
 		border-radius: 8px;
-		color: rgba(255, 255, 255, 0.9);
 		cursor: pointer;
-		transition: all 0.2s ease;
+		transition: background-color 0.2s ease;
 		text-align: left;
-		position: relative;
 	}
 	
 	.bookmark-item:hover {
-		background: color-mix(in srgb, var(--dominant-color) 20%, transparent);
-		color: white;
-		transform: translateX(4px);
-	}
-	
-	.bookmark-item:focus-visible {
-		outline: 2px solid var(--dominant-color);
-		outline-offset: -2px;
-	}
-	
-	.bookmark-icon {
-		width: calc(20px * var(--bookmark-size));
-		height: calc(20px * var(--bookmark-size));
-		border-radius: 4px;
-		overflow: hidden;
-		flex-shrink: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
 		background: rgba(255, 255, 255, 0.1);
 	}
 	
-	.bookmark-icon img {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
+	.bookmark-favicon {
+		width: 20px;
+		height: 20px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
 	}
 	
-	.bookmark-fallback {
-		font-size: calc(12px * var(--bookmark-size));
-		opacity: 0.7;
+	.bookmark-favicon img {
+		width: 16px;
+		height: 16px;
+		border-radius: 2px;
+	}
+	
+	.custom-icon, .default-favicon {
+		font-size: 14px;
 	}
 	
 	.bookmark-info {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
 		flex: 1;
+		min-width: 0;
 	}
 	
 	.bookmark-title {
+		display: block;
+		font-size: 0.875rem;
 		font-weight: 500;
-		font-size: calc(13px * var(--bookmark-size));
-		white-space: nowrap;
+		color: #333;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		line-height: 1.2;
+		white-space: nowrap;
 	}
 	
 	.bookmark-description {
-		font-size: calc(11px * var(--bookmark-size));
-		opacity: 0.7;
-		white-space: nowrap;
+		display: block;
+		font-size: 0.75rem;
+		color: #666;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		line-height: 1.2;
+		white-space: nowrap;
+		margin-top: 2px;
 	}
 	
 	.bookmark-domain {
-		font-size: calc(10px * var(--bookmark-size));
-		opacity: 0.5;
-		font-family: monospace;
+		display: block;
+		font-size: 0.7rem;
+		color: #888;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		margin-top: 2px;
 	}
 	
 	.collapse-button {
+		width: 100%;
+		padding: 0.75rem;
+		background: rgba(255, 255, 255, 0.1);
+		border: none;
+		border-top: 1px solid rgba(255, 255, 255, 0.2);
+		color: #666;
+		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		gap: 6px;
-		width: 100%;
-		height: 32px;
-		background: rgba(255, 255, 255, 0.05);
-		border: none;
-		border-top: 1px solid rgba(255, 255, 255, 0.1);
-		color: rgba(255, 255, 255, 0.6);
-		cursor: pointer;
-		transition: all 0.2s ease;
-		font-size: 12px;
+		gap: 0.5rem;
+		font-size: 0.8rem;
+		transition: background-color 0.2s ease;
 	}
 	
 	.collapse-button:hover {
-		background: rgba(255, 255, 255, 0.1);
-		color: rgba(255, 255, 255, 0.9);
+		background: rgba(255, 255, 255, 0.15);
+		color: #333;
 	}
 	
-	/* Enhanced empty state */
-	.empty-state {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 24px;
-		padding: 60px 20px;
-		text-align: center;
-		max-width: 400px;
-		margin: 0 auto;
-	}
-	
-	.empty-folder {
-		perspective: 1000px;
-		transform-style: preserve-3d;
-		cursor: pointer;
-		transition: all 0.3s ease;
-	}
-	
-	.empty-folder.faded {
-		opacity: 0.4;
-		filter: grayscale(0.8);
-	}
-	
-	.empty-folder:hover {
-		opacity: 0.7;
-		transform: translateY(-4px) scale(1.1);
-	}
-	
-	.empty-title {
-		font-size: 24px;
-		font-weight: 600;
-		color: rgba(255, 255, 255, 0.9);
-		margin: 0;
-	}
-	
-	.empty-message {
-		color: rgba(255, 255, 255, 0.7);
-		font-size: 16px;
-		line-height: 1.5;
-		margin: 0;
-	}
-	
-	.empty-action-button {
-		background: var(--dominant-color);
-		color: var(--text-color);
-		border: none;
-		padding: 12px 24px;
-		border-radius: 8px;
-		font-size: 14px;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.2s ease;
-	}
-	
-	.empty-action-button:hover {
-		transform: translateY(-2px);
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-	}
-	
-	/* Enhanced quick add button */
 	.quick-add-button {
 		position: fixed;
-		bottom: clamp(20px, 5vh, 40px);
-		right: clamp(20px, 5vw, 40px);
+		bottom: 2rem;
+		right: 2rem;
 		width: 56px;
 		height: 56px;
+		background: rgba(255, 255, 255, 0.2);
+		backdrop-filter: blur(10px);
+		border: 1px solid rgba(255, 255, 255, 0.3);
 		border-radius: 50%;
-		background: var(--dominant-color);
-		border: none;
-		color: var(--text-color);
+		color: var(--text-color, #ffffff);
 		cursor: pointer;
-		box-shadow: 
-			0 8px 24px rgba(0, 0, 0, 0.3),
-			0 0 0 1px rgba(255, 255, 255, 0.1);
-		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-		z-index: 100;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		backdrop-filter: blur(10px);
+		transition: all 0.3s ease;
+		z-index: 5;
 	}
 	
 	.quick-add-button:hover {
-		transform: translateY(-2px) scale(1.05);
-		box-shadow: 
-			0 12px 32px rgba(0, 0, 0, 0.4),
-			0 0 0 1px rgba(255, 255, 255, 0.2);
+		background: rgba(255, 255, 255, 0.3);
+		border-color: rgba(255, 255, 255, 0.5);
+		transform: scale(1.1);
 	}
 	
-	.quick-add-button:active {
-		transform: translateY(0) scale(0.95);
-	}
-	
-	.quick-add-button:focus-visible {
-		outline: 2px solid var(--dominant-color);
-		outline-offset: 4px;
-	}
-	
-	/* Screen reader only content */
 	.sr-only {
 		position: absolute;
 		width: 1px;
@@ -1523,85 +1315,79 @@
 		border: 0;
 	}
 	
-	/* Custom scrollbar */
-	.dropdown-content::-webkit-scrollbar {
-		width: 6px;
-	}
-	
-	.dropdown-content::-webkit-scrollbar-track {
-		background: rgba(255, 255, 255, 0.1);
-		border-radius: 3px;
-	}
-	
-	.dropdown-content::-webkit-scrollbar-thumb {
-		background: var(--dominant-color);
-		border-radius: 3px;
-	}
-	
-	.dropdown-content::-webkit-scrollbar-thumb:hover {
-		background: color-mix(in srgb, var(--dominant-color) 80%, white);
-	}
-	
-	/* Performance optimizations */
-	@media (prefers-reduced-motion: reduce) {
-		.bookmark-folder,
-		.folder-object,
-		.folder-glow {
-			animation: none !important;
-			transition: none !important;
+	/* Animations */
+	@keyframes fadeInUp {
+		from {
+			opacity: 0;
+			transform: translateY(20px);
 		}
-		
-		.bookmark-folder.hovered {
-			transform: scale(1.02);
+		to {
+			opacity: 1;
+			transform: translateY(0);
 		}
-		
-		.bookmark-category {
-			animation: none;
+	}
+	
+	@keyframes categoryFadeIn {
+		from {
+			opacity: 0;
+			transform: translateY(20px) scale(0.9);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0) scale(1);
+		}
+	}
+	
+	@keyframes dropdownFadeIn {
+		from {
+			opacity: 0;
+			transform: translateX(-50%) translateY(-10px);
+		}
+		to {
+			opacity: 1;
+			transform: translateX(-50%) translateY(0);
+		}
+	}
+	
+	@keyframes gentleFloat {
+		0%, 100% {
+			transform: translateY(0) rotateY(0deg);
+		}
+		50% {
+			transform: translateY(-10px) rotateY(5deg);
 		}
 	}
 	
 	/* Responsive design */
 	@media (max-width: 768px) {
+		.bookmark-grid-container {
+			padding: 1rem;
+		}
+		
 		.bookmark-grid {
 			grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-			gap: 16px;
+			gap: 1.5rem;
+		}
+		
+		.bookmark-dropdown {
+			min-width: 240px;
+			max-width: 90vw;
 		}
 		
 		.quick-add-button {
+			bottom: 1rem;
+			right: 1rem;
 			width: 48px;
 			height: 48px;
 		}
-		
-		.bookmark-folder.hovered {
-			transform: translateY(-4px) scale(1.02);
-		}
-		
-		.bookmark-dropdown {
-			max-width: calc(100vw - 40px);
-		}
 	}
 	
-	@media (max-width: 480px) {
-		.bookmark-grid-container {
-			padding: 0 16px;
-		}
-		
-		.bookmark-grid {
-			gap: 12px;
-		}
-	}
-	
-	/* High DPI displays */
-	@media (-webkit-min-device-pixel-ratio: 2) {
-		.folder-face {
-			border-width: 0.5px;
-		}
-	}
-	
-	/* Dark mode support */
-	@media (prefers-color-scheme: dark) {
-		.bookmark-dropdown {
-			background: rgba(10, 10, 10, 0.95);
+	/* Performance optimizations */
+	@media (prefers-reduced-motion: reduce) {
+		*, *::before, *::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
 		}
 	}
 </style>
