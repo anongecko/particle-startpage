@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en" %sveltekit.theme%>
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
+
+		<!-- Enhanced viewport for 3D and mobile performance -->
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+		/>
+		<meta name="theme-color" content="#000000" />
+		<meta name="color-scheme" content="dark light" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+		<!-- Enhanced meta tags for performance -->
+		<meta name="referrer" content="no-referrer-when-downgrade" />
+		<meta name="format-detection" content="telephone=no" />
+		<meta name="msapplication-tap-highlight" content="no" />
+
+		<!-- WebGL and 3D optimization hints -->
+		<meta name="renderer" content="webkit" />
+		<meta name="force-rendering" content="webkit" />
+		<meta name="full-screen" content="yes" />
+		<meta name="x5-fullscreen" content="true" />
+		<meta name="360-fullscreen" content="true" />
+
+		<title>Particle Nexus</title>
+		<meta
+			name="description"
+			content="A beautiful, interactive browser homepage with 3D objects, animated particles, and dynamic wallpapers. Transform your new tab experience."
+		/>
+		<meta
+			name="keywords"
+			content="homepage, start page, new tab, 3D objects, particles, wallpaper, browser, WebGL, interactive"
+		/>
+		<meta name="author" content="Particle Nexus" />
+
+		<!-- Enhanced font loading with swap for better performance -->
+		<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
+		<link rel="dns-prefetch" href="https://fonts.googleapis.com" />
+		<link
+			rel="preload"
+			href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+			as="style"
+			onload="this.onload=null;this.rel='stylesheet'"
+		/>
+
+		<!-- Preload critical assets -->
+		<link rel="preload" as="image" href="%sveltekit.assets%/wallpapers/" />
+
+		<!-- PWA manifest for app-like experience -->
+		<link rel="manifest" href="%sveltekit.assets%/manifest.json" />
+
+		%sveltekit.head%
+
+		<style>
+			:root {
+				--font-system:
+					-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+					sans-serif;
+				--font-size-multiplier: 1;
+				--webgl-supported: 1;
+			}
+
+			/* Critical CSS for instant loading */
+			*,
+			*::before,
+			*::after {
+				margin: 0;
+				padding: 0;
+				box-sizing: border-box;
+			}
+
+			html {
+				height: 100%;
+				overflow: hidden;
+				font-family: var(--font-system);
+				-webkit-font-smoothing: antialiased;
+				-moz-osx-font-smoothing: grayscale;
+				text-rendering: optimizeLegibility;
+				font-feature-settings: 'kern' 1;
+				font-kerning: normal;
+				/* Enhanced GPU acceleration for WebGL */
+				transform: translate3d(0, 0, 0);
+				backface-visibility: hidden;
+				perspective: 1000px;
+			}
+
+			body {
+				height: 100%;
+				overflow: hidden;
+				background: #000;
+				color: #fff;
+				user-select: none;
+				-webkit-user-select: none;
+				-ms-user-select: none;
+				touch-action: manipulation;
+				/* Enhanced 3D performance */
+				transform: translateZ(0);
+				will-change: transform;
+				/* Disable rubber band scrolling on iOS */
+				overscroll-behavior: none;
+				-webkit-overflow-scrolling: touch;
+			}
+
+			#svelte {
+				height: 100%;
+				width: 100%;
+				position: relative;
+				/* 3D context for children */
+				transform-style: preserve-3d;
+			}
+
+			/* WebGL context creation optimization */
+			canvas {
+				display: block;
+				max-width: 100%;
+				height: auto;
+				/* Prevent canvas scaling issues */
+				image-rendering: pixelated;
+				image-rendering: -moz-crisp-edges;
+				image-rendering: crisp-edges;
+			}
+
+			/* Loading state optimization */
+			.loading-screen {
+				position: fixed;
+				inset: 0;
+				background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+				z-index: 9999;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			}
+
+			/* Prevent flash of unstyled content */
+			[data-svelte] {
+				opacity: 0;
+				transition: opacity 0.3s ease;
+			}
+
+			[data-svelte].loaded {
+				opacity: 1;
+			}
+
+			/* Enhanced reduced motion support */
+			@media (prefers-reduced-motion: reduce) {
+				*,
+				*::before,
+				*::after {
+					animation-duration: 0.01ms !important;
+					animation-iteration-count: 1 !important;
+					transition-duration: 0.01ms !important;
+					scroll-behavior: auto !important;
+				}
+
+				html {
+					scroll-behavior: auto;
+				}
+			}
+
+			/* High refresh rate optimizations */
+			@media (min-refresh-rate: 90Hz) {
+				* {
+					animation-fill-mode: both;
+				}
+			}
+
+			/* Mobile optimizations */
+			@media (max-width: 768px) {
+				html {
+					font-size: 14px;
+					/* Reduce 3D complexity on mobile */
+					--webgl-supported: 0.5;
+				}
+
+				body {
+					/* Enhanced mobile performance */
+					-webkit-transform: translateZ(0);
+					-webkit-backface-visibility: hidden;
+					-webkit-perspective: 1000;
+				}
+			}
+
+			/* Tablet optimizations */
+			@media (min-width: 769px) and (max-width: 1024px) {
+				:root {
+					--font-size-multiplier: 1.1;
+				}
+			}
+
+			/* Desktop optimizations */
+			@media (min-width: 1025px) {
+				:root {
+					--font-size-multiplier: 1.2;
+				}
+
+				html {
+					/* Enhanced desktop WebGL support */
+					--webgl-supported: 1;
+				}
+			}
+
+			/* Print styles */
+			@media print {
+				* {
+					background: transparent !important;
+					color: black !important;
+					box-shadow: none !important;
+					text-shadow: none !important;
+				}
+			}
+		</style>
+
+		<!-- Inline critical JavaScript for WebGL detection -->
+		<script>
+			// Early WebGL detection to prevent layout shifts
+			(function () {
+				try {
+					const canvas = document.createElement('canvas');
+					const webgl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+					if (webgl) {
+						document.documentElement.classList.add('webgl-supported');
+						document.documentElement.style.setProperty('--webgl-supported', '1');
+					} else {
+						document.documentElement.classList.add('webgl-not-supported');
+						document.documentElement.style.setProperty('--webgl-supported', '0');
+					}
+				} catch (e) {
+					document.documentElement.classList.add('webgl-not-supported');
+					document.documentElement.style.setProperty('--webgl-supported', '0');
+				}
+			})();
+
+			// Performance optimization: reduce animations on low-end devices
+			(function () {
+				const isLowEnd = navigator.hardwareConcurrency && navigator.hardwareConcurrency < 4;
+				const isSlowConnection =
+					navigator.connection && navigator.connection.effectiveType === 'slow-2g';
+
+				if (isLowEnd || isSlowConnection) {
+					document.documentElement.classList.add('low-performance');
+				}
+			})();
+
+			// Early dark mode detection
+			(function () {
+				const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+				document.documentElement.classList.add(prefersDark ? 'dark' : 'light');
+			})();
+		</script>
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div id="svelte" style="display: contents" data-svelte>%sveltekit.body%</div>
+
+		<!-- Performance monitoring script -->
+		<script>
+			// Mark app as loaded for performance tracking
+			window.addEventListener('load', function () {
+				document.querySelector('[data-svelte]')?.classList.add('loaded');
+
+				// Report Core Web Vitals
+				if ('performance' in window && 'measure' in performance) {
+					performance.mark('app-loaded');
+				}
+			});
+		</script>
+	</body>
+</html>
