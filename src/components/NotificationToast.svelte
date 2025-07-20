@@ -13,7 +13,7 @@
 	
 	const dispatch = createEventDispatcher();
 	
-	let toastElement: HTMLDivElement;
+	let toastElement: HTMLDivElement = $state();
 	let timeoutId: NodeJS.Timeout;
 	let isVisible = $state(false);
 	
@@ -51,6 +51,11 @@
 			case 'warning':
 				return AlertTriangle;
 		}
+	}
+	
+	function getIconComponent() {
+		const IconComponent = getIcon();
+		return IconComponent;
 	}
 	
 	function getAriaRole() {
@@ -106,10 +111,17 @@
 		aria-atomic="true"
 		tabindex="-1"
 	>
-		<div class="toast toast-{type}" onclick={(e) => e.stopPropagation()}>
+		<div 
+			class="toast toast-{type}" 
+			role="button"
+			tabindex="0"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
+		>
 			<div class="toast-content">
 				<div class="toast-icon" aria-hidden="true">
-					<svelte:component this={getIcon()} size={20} />
+					{@const IconComponent = getIconComponent()}
+					<IconComponent size={20} />
 				</div>
 				<span class="toast-message">{message}</span>
 			</div>

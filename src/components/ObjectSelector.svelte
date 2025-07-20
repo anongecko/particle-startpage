@@ -18,8 +18,8 @@
 	let currentSelection: Object3DConfig | null = $state(selectedObject || null);
 	let previewObject: Object3DConfig | null = $state(null);
 	let focusedIndex = $state(0);
-	let gridElement: HTMLDivElement;
-	let confirmButton: HTMLButtonElement;
+	let gridElement: HTMLDivElement = $state();
+	let confirmButton: HTMLButtonElement = $state();
 	
 	const GRID_COLS = 4;
 	
@@ -164,7 +164,7 @@
 							{@const row = Math.floor(index / GRID_COLS) + 1}
 							{@const col = (index % GRID_COLS) + 1}
 							
-							<div
+							<button
 								class="object-item"
 								class:selected={isSelected}
 								class:focused={isFocused}
@@ -176,12 +176,13 @@
 								onclick={() => handleObjectSelect(object, index)}
 								onfocus={() => { focusedIndex = index; }}
 								aria-label={`Select ${object.name} for ${category} category`}
+								type="button"
 							>
 								<div class="object-preview" aria-hidden="true">
 									<Object3D config={object} size={60} interactive={false} />
 								</div>
 								<span class="object-name">{object.name}</span>
-							</div>
+							</button>
 						{/each}
 					</div>
 				</div>
@@ -301,6 +302,8 @@
 		background: rgba(255, 255, 255, 0.5);
 		outline: none;
 		position: relative;
+		width: 100%;
+		font: inherit;
 	}
 	
 	.object-item:hover {

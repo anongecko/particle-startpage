@@ -4,34 +4,42 @@
 	import { tweened } from 'svelte/motion';
 	import { cubicOut, sineInOut } from 'svelte/easing';
 	import { bookmarkStore } from '$stores/bookmarks';
-	import { settingsStore } from '$stores/settings';
+	import { settingsStore, defaultSearchEngine } from '$stores/settings';
 	
-	export let element: HTMLElement | null = null;
-	export let focused: boolean = false;
-	export let dominantColor: string = '#ffffff';
-	export let settings: any;
+	interface Props {
+		element?: HTMLElement | null;
+		focused?: boolean;
+		dominantColor?: string;
+		settings?: any;
+	}
+	
+	let {
+		element = $bindable(null),
+		focused = $bindable(false),
+		dominantColor = '#ffffff',
+		settings
+	}: Props = $props();
 	
 	const dispatch = createEventDispatcher();
 	
-	let searchInput: HTMLInputElement;
-	let searchContainer: HTMLElement;
-	let dropdownElement: HTMLElement;
-	let contextMenuElement: HTMLElement;
-	let query = '';
-	let isDropdownOpen = false;
-	let isContextMenuOpen = false;
-	let contextMenuPosition = { x: 0, y: 0 };
-	let filteredBookmarks = [];
-	let showBookmarkSuggestions = false;
-	let selectedSuggestionIndex = -1;
+	let searchInput: HTMLInputElement = $state();
+	let searchContainer: HTMLElement = $state();
+	let dropdownElement: HTMLElement = $state();
+	let contextMenuElement: HTMLElement = $state();
+	let query = $state('');
+	let isDropdownOpen = $state(false);
+	let isContextMenuOpen = $state(false);
+	let contextMenuPosition = $state({ x: 0, y: 0 });
+	let filteredBookmarks = $state([]);
+	let showBookmarkSuggestions = $state(false);
+	let selectedSuggestionIndex = $state(-1);
+	let searchEngines = $state([]);
+	let currentEngine = $state(null);
+	let engineShortcuts = $state(new Map());
 	
 	const breathingIntensity = tweened(0.3, { duration: 2000, easing: sineInOut });
 	const focusIntensity = tweened(0, { duration: 300, easing: cubicOut });
 	const submitAnimation = tweened(0, { duration: 400, easing: cubicOut });
-	
-	let searchEngines = [];
-	let currentEngine = null;
-	let engineShortcuts = new Map();
 	
 	interface SearchEngine {
 		id: string;
@@ -108,10 +116,15 @@
 		}
 	];
 	
+	let gradientColors = $derived(getGradientColors());
+	let textColor = $derived(getContrastColor(dominantColor));
+	let placeholderText = $derived(currentEngine?.name || 'Search');
+	let bookmarks = $derived($bookmarkStore);
+	let userSearchEngine = $derived($defaultSearchEngine);
+	
 	async function searchBookmarks(searchQuery: string): Promise<BookmarkSuggestion[]> {
 		if (!searchQuery.trim() || searchQuery.length < 2) return [];
 		
-		const bookmarks = $bookmarkStore;
 		const results: BookmarkSuggestion[] = [];
 		const queryLower = searchQuery.toLowerCase();
 		
@@ -218,7 +231,7 @@
 		}, 150);
 	}
 	
-	async function handleInput(): void {
+	async function handleInput(): Promise<void> {
 		await updateBookmarkSuggestions();
 	}
 	
@@ -343,8 +356,8 @@
 		isDropdownOpen = false;
 		
 		// Update settings
-		settingsStore.update(settings => ({
-			...settings,
+		settingsStore.update(currentSettings => ({
+			...currentSettings,
 			searchEngines: searchEngines.map(e => ({
 				...e,
 				isDefault: e.id === engine.id
@@ -378,6 +391,13 @@
 				contextMenuElement.focus();
 			}
 		}, 10);
+	}
+	
+	function handleContextKeyDown(event: KeyboardEvent): void {
+		if (event.key === 'Escape') {
+			closeContextMenu();
+			searchInput.focus();
+		}
 	}
 	
 	function closeContextMenu(): void {
@@ -470,19 +490,20 @@
 	});
 	
 	// Reactive updates
-	$: if (settings?.searchEngines) {
-		initializeSearchEngines();
-	}
-	
-	$: gradientColors = getGradientColors();
-	$: textColor = getContrastColor(dominantColor);
-	$: placeholderText = currentEngine?.name || 'Search';
+	$effect(() => {
+		if (settings?.searchEngines || userSearchEngine) {
+			initializeSearchEngines();
+		}
+	});
 </script>
 
 <div 
 	class="search-container"
 	bind:this={searchContainer}
-	on:contextmenu={handleRightClick}
+	oncontextmenu={handleRightClick}
+	onkeydown={handleContextKeyDown}
+	role="search"
+	aria-label="Search interface with engine selection"
 	style="
 		--breathing-intensity: {$breathingIntensity};
 		--focus-intensity: {$focusIntensity};
@@ -504,36 +525,47 @@
 			autocapitalize="off"
 			spellcheck="false"
 			inputmode="search"
-			on:focus={handleFocus}
-			on:blur={handleBlur}
-			on:input={handleInput}
-			on:keydown={handleKeyDown}
+			onfocus={handleFocus}
+			onblur={handleBlur}
+			oninput={handleInput}
+			onkeydown={handleKeyDown}
+			aria-label="Search input"
+			aria-describedby={showBookmarkSuggestions ? 'search-suggestions' : undefined}
+			aria-expanded={showBookmarkSuggestions}
+			aria-autocomplete="list"
+			role="searchbox"
 		/>
 		
 		<button
 			class="engine-selector"
 			class:open={isDropdownOpen}
-			on:click={toggleEngineDropdown}
-			aria-label="Select search engine"
+			onclick={toggleEngineDropdown}
+			aria-label={`Select search engine. Current: ${currentEngine?.name || 'Default'}`}
+			aria-expanded={isDropdownOpen}
+			aria-haspopup="listbox"
 			tabindex="-1"
+			type="button"
 		>
-			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
 				<polyline points="6,9 12,15 18,9"></polyline>
 			</svg>
 		</button>
 	</div>
 	
 	{#if isDropdownOpen}
-		<div class="dropdown" bind:this={dropdownElement}>
+		<div class="dropdown" bind:this={dropdownElement} role="listbox" aria-label="Search engines">
 			{#each searchEngines as engine}
 				<button
 					class="dropdown-item"
 					class:active={engine.id === currentEngine?.id}
-					on:click={() => selectEngine(engine)}
+					onclick={() => selectEngine(engine)}
+					role="option"
+					aria-selected={engine.id === currentEngine?.id}
+					type="button"
 				>
 					<span class="engine-name">{engine.name}</span>
 					{#if engine.shortcut}
-						<span class="engine-shortcut">Ctrl+{engine.shortcut.toUpperCase()}</span>
+						<span class="engine-shortcut" aria-label="Keyboard shortcut">Ctrl+{engine.shortcut.toUpperCase()}</span>
 					{/if}
 				</button>
 			{/each}
@@ -541,18 +573,27 @@
 	{/if}
 	
 	{#if showBookmarkSuggestions && filteredBookmarks.length > 0}
-		<div class="suggestions">
+		<div 
+			class="suggestions" 
+			id="search-suggestions"
+			role="listbox"
+			aria-label="Bookmark suggestions"
+		>
 			{#each filteredBookmarks as suggestion, index}
 				<button
 					class="suggestion-item"
 					class:selected={index === selectedSuggestionIndex}
-					on:click={() => selectBookmarkSuggestion(suggestion)}
+					onclick={() => selectBookmarkSuggestion(suggestion)}
+					role="option"
+					aria-selected={index === selectedSuggestionIndex}
+					aria-label={`${suggestion.title} in ${suggestion.categoryName}`}
+					type="button"
 				>
 					<div class="suggestion-content">
 						<span class="suggestion-title">{suggestion.title}</span>
 						<span class="suggestion-category">{suggestion.categoryName}</span>
 					</div>
-					<span class="suggestion-url">{suggestion.url}</span>
+					<span class="suggestion-url" aria-hidden="true">{suggestion.url}</span>
 				</button>
 			{/each}
 		</div>
@@ -564,17 +605,23 @@
 			bind:this={contextMenuElement}
 			style="left: {contextMenuPosition.x}px; top: {contextMenuPosition.y}px;"
 			tabindex="-1"
-			on:blur={closeContextMenu}
+			onblur={closeContextMenu}
+			onkeydown={handleContextKeyDown}
+			role="menu"
+			aria-label="Search engine context menu"
 		>
 			{#each searchEngines as engine}
 				<button
 					class="context-menu-item"
 					class:active={engine.id === currentEngine?.id}
-					on:click={() => { selectEngine(engine); closeContextMenu(); }}
+					onclick={() => { selectEngine(engine); closeContextMenu(); }}
+					role="menuitem"
+					aria-label={`Switch to ${engine.name}`}
+					type="button"
 				>
 					{engine.name}
 					{#if engine.shortcut}
-						<span class="shortcut-hint">Ctrl+{engine.shortcut.toUpperCase()}</span>
+						<span class="shortcut-hint" aria-hidden="true">Ctrl+{engine.shortcut.toUpperCase()}</span>
 					{/if}
 				</button>
 			{/each}
@@ -691,6 +738,11 @@
 		background: rgba(255, 255, 255, 0.1);
 	}
 	
+	.engine-selector:focus-visible {
+		outline: 2px solid var(--primary-color);
+		outline-offset: 2px;
+	}
+	
 	.engine-selector.open {
 		color: var(--primary-color);
 		transform: translateY(-50%) rotate(180deg);
@@ -735,9 +787,11 @@
 		text-align: left;
 	}
 	
-	.dropdown-item:hover {
+	.dropdown-item:hover,
+	.dropdown-item:focus-visible {
 		background: rgba(255, 255, 255, 0.1);
 		color: rgba(255, 255, 255, 1);
+		outline: none;
 	}
 	
 	.dropdown-item.active {
@@ -786,9 +840,11 @@
 	}
 	
 	.suggestion-item:hover,
+	.suggestion-item:focus-visible,
 	.suggestion-item.selected {
 		background: rgba(255, 255, 255, 0.1);
 		color: rgba(255, 255, 255, 1);
+		outline: none;
 	}
 	
 	.suggestion-content {
@@ -848,9 +904,11 @@
 		font-size: 14px;
 	}
 	
-	.context-menu-item:hover {
+	.context-menu-item:hover,
+	.context-menu-item:focus-visible {
 		background: rgba(255, 255, 255, 0.1);
 		color: rgba(255, 255, 255, 1);
+		outline: none;
 	}
 	
 	.context-menu-item.active {

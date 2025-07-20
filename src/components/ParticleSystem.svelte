@@ -4,25 +4,39 @@
 	import { PerformanceMonitor } from '$lib/performance';
 	import { debounce, throttle } from '$lib/utils';
 	
-	export let count = 80;
-	export let windowWidth = 0;
-	export let windowHeight = 0;
-	export let dominantColor = '#4a90e2';
-	export let enabled = true;
-	export let mouseInfluenceRadius = 150;
-	export let opacity = 1.0;
-	export let speed = 1.0;
-	export let performanceMode: 'low' | 'medium' | 'high' = 'high';
+	interface Props {
+		count?: number;
+		windowWidth?: number;
+		windowHeight?: number;
+		dominantColor?: string;
+		enabled?: boolean;
+		mouseInfluenceRadius?: number;
+		opacity?: number;
+		speed?: number;
+		performanceMode?: 'low' | 'medium' | 'high';
+	}
 	
-	let canvas: HTMLCanvasElement;
-	let particleSystem: ParticleNexusSystem | null = null;
-	let animationFrame: number;
-	let isInitialized = false;
-	let lastInteractionTime = 0;
-	let hasWebGL2 = false;
-	let isMobile = false;
-	let performanceMonitor = new PerformanceMonitor();
-	let resizeObserver: ResizeObserver | null = null;
+	let {
+		count = 80,
+		windowWidth = $bindable(0),
+		windowHeight = $bindable(0),
+		dominantColor = '#4a90e2',
+		enabled = true,
+		mouseInfluenceRadius = 150,
+		opacity = 1.0,
+		speed = 1.0,
+		performanceMode = 'high'
+	}: Props = $props();
+	
+	let canvas: HTMLCanvasElement = $state();
+	let particleSystem: ParticleNexusSystem | null = $state();
+	let animationFrame: number = $state(0);
+	let isInitialized = $state(false);
+	let lastInteractionTime = $state(0);
+	let hasWebGL2 = $state(false);
+	let isMobile = $state(false);
+	let performanceMonitor: PerformanceMonitor = $state();
+	let resizeObserver: ResizeObserver | null = $state();
 	
 	const dispatch = createEventDispatcher();
 	
@@ -663,6 +677,9 @@
 		if (!browser) return;
 		
 		try {
+			// Initialize performance monitor
+			performanceMonitor = new PerformanceMonitor();
+			
 			// Detect device capabilities
 			isMobile = /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 			
@@ -710,7 +727,9 @@
 			resizeObserver.disconnect();
 		}
 		
-		performanceMonitor.destroy();
+		if (performanceMonitor) {
+			performanceMonitor.destroy();
+		}
 	});
 	
 	function setupResizeObserver(): void {
@@ -751,7 +770,7 @@
 			lastTime = currentTime;
 			
 			// Performance monitoring
-			const profileId = performanceMonitor.startProfile('particle-frame');
+			const profileId = performanceMonitor?.startProfile('particle-frame');
 			
 			try {
 				particleSystem.update(deltaTime);
@@ -760,7 +779,9 @@
 				console.error('Animation loop error:', error);
 			}
 			
-			performanceMonitor.endProfile(profileId);
+			if (profileId && performanceMonitor) {
+				performanceMonitor.endProfile(profileId);
+			}
 			
 			animationFrame = requestAnimationFrame(animate);
 		};
@@ -823,24 +844,28 @@
 		}
 	};
 	
-	// Reactive updates
-	$: if (particleSystem && dominantColor) {
-		particleSystem.updateColor(dominantColor);
-	}
-	
-	$: if (particleSystem && count) {
-		particleSystem.updateParticleCount(count);
-	}
-	
 	// Public API
 	export function getPerformanceMetrics() {
-		return performanceMonitor.getMetrics();
+		return performanceMonitor?.getMetrics();
 	}
 	
 	export function addEffect(x: number, y: number, type: 'burst' | 'ripple' = 'burst') {
 		// Could implement special effects here
 		dispatch('effect', { x, y, type });
 	}
+	
+	// Reactive updates
+	$effect(() => {
+		if (particleSystem && dominantColor) {
+			particleSystem.updateColor(dominantColor);
+		}
+	});
+	
+	$effect(() => {
+		if (particleSystem && count) {
+			particleSystem.updateParticleCount(count);
+		}
+	});
 </script>
 
 <canvas
@@ -851,12 +876,12 @@
 	class:enabled
 	class:mobile={isMobile}
 	class:high-performance={performanceMode === 'high'}
-	on:mousemove={handleMouseMove}
-	on:mousedown={handleMouseDown}
-	on:mouseup={handleMouseUp}
-	on:touchstart={handleTouchStart}
-	on:touchmove={handleTouchMove}
-	on:touchend={handleTouchEnd}
+	onmousemove={handleMouseMove}
+	onmousedown={handleMouseDown}
+	onmouseup={handleMouseUp}
+	ontouchstart={handleTouchStart}
+	ontouchmove={handleTouchMove}
+	ontouchend={handleTouchEnd}
 	style="
 		position: absolute;
 		top: 0;
@@ -867,9 +892,9 @@
 		z-index: 1;
 		opacity: {opacity};
 	"
-	role="img"
 	aria-label="Interactive particle animation background"
 	aria-hidden={!enabled}
+	role="application"
 ></canvas>
 
 <style>
