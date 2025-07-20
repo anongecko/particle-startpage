@@ -9,7 +9,8 @@
 	import { colorStore } from '$stores/color';
 	import { object3DAnalytics } from '$stores/bookmarks';
 	import { settingsAPI } from '$lib/api';
-	import { debounce, formatFileSize, PerformanceMonitor } from '$lib/utils';
+	import { debounce, formatFileSize } from '$lib/utils';
+	import { PerformanceMonitor } from '$lib/performance';
 	import { getAllObjects, getObjectsByCategory, OBJECT_CATEGORIES } from '$lib/objects';
 	import Object3D from './Object3D.svelte';
 	
@@ -32,6 +33,7 @@
 	let object3DPreviewRef = null;
 	let objectBrowserCategory = 'all';
 	let threeDPerformanceMode = 'high';
+	let focusedElementBeforeModal: HTMLElement | null = null;
 	
 	const modalScale = spring(0.8, { stiffness: 0.3, damping: 0.8 });
 	const modalOpacity = tweened(0, { duration: 300, easing: cubicOut });
@@ -54,12 +56,13 @@
 	let performanceMonitor: PerformanceMonitor;
 	let availableObjects = [];
 	let filteredObjects = [];
+	let performanceUpdateInterval: number;
 	
 	$: filteredTabs = searchQuery 
 		? tabs.filter(tab => tab.label.toLowerCase().includes(searchQuery.toLowerCase()))
 		: tabs;
 	
-	$: if (browser) {
+	$: if (browser && performanceMonitor) {
 		updatePerformanceStats();
 		loadAvailableObjects();
 	}
@@ -97,7 +100,6 @@
 		current[keys[keys.length - 1]] = value;
 		debouncedSettingsUpdate(newSettings);
 		
-		// Trigger real-time preview for 3D settings
 		if (path.startsWith('objects3d.')) {
 			triggerPreviewUpdate();
 		}
@@ -106,8 +108,14 @@
 	function updatePerformanceStats() {
 		if (!performanceMonitor) return;
 		
+		const metrics = performanceMonitor.getMetrics({ limit: 10 });
+		const latestMetrics = metrics.reduce((acc, metric) => {
+			acc[metric.name] = metric.value;
+			return acc;
+		}, {} as Record<string, number>);
+		
 		performanceStats = {
-			fps: Math.round(performanceMonitor.getAverage('frame') || 60),
+			fps: Math.round(latestMetrics['fps'] || 60),
 			memory: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1024 / 1024) : 0,
 			particles: wallpapers?.particleCount || 0,
 			objects3D: $object3DAnalytics?.activeObjects || 0
@@ -142,14 +150,19 @@
 				const renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'Unknown';
 				console.log('WebGL Renderer:', renderer);
 			}
-		} catch (e) {
+		} catch (error) {
+			console.error('WebGL support check failed:', error);
 			webGLSupported = false;
 		}
 	}
 	
-	function loadAvailableObjects() {
-		availableObjects = getAllObjects();
-		updateFilteredObjects();
+	async function loadAvailableObjects() {
+		try {
+			availableObjects = await getAllObjects();
+		} catch (error) {
+			console.error('Failed to load available objects:', error);
+			availableObjects = [];
+		}
 	}
 	
 	function updateFilteredObjects() {
@@ -160,60 +173,9 @@
 		}
 	}
 	
-	function selectObject(objectConfig: any) {
-		selectedObject3D = objectConfig;
-		previewScale.set(1.1);
-		setTimeout(() => previewScale.set(1), 200);
-		
-		// Update preview
-		triggerPreviewUpdate();
-	}
-	
 	function triggerPreviewUpdate() {
 		if (object3DPreviewRef) {
-			object3DPreviewRef.updateConfiguration(threeDSettings);
-		}
-	}
-	
-	function apply3DPerformancePreset(preset: string) {
-		threeDPerformanceMode = preset;
-		
-		const presets = {
-			low: {
-				enableAnimations: false,
-				enableGlow: false,
-				enableShadows: false,
-				globalScale: 0.8,
-				animationSpeed: 0.5
-			},
-			medium: {
-				enableAnimations: true,
-				enableGlow: false,
-				enableShadows: false,
-				globalScale: 0.9,
-				animationSpeed: 0.8
-			},
-			high: {
-				enableAnimations: true,
-				enableGlow: true,
-				enableShadows: true,
-				globalScale: 1.0,
-				animationSpeed: 1.0
-			},
-			ultra: {
-				enableAnimations: true,
-				enableGlow: true,
-				enableShadows: true,
-				globalScale: 1.2,
-				animationSpeed: 1.5
-			}
-		};
-		
-		const presetConfig = presets[preset];
-		if (presetConfig) {
-			Object.entries(presetConfig).forEach(([key, value]) => {
-				updateSetting(`objects3d.${key}`, value);
-			});
+			object3DPreviewRef.updateConfiguration?.(threeDSettings);
 		}
 	}
 	
@@ -221,32 +183,30 @@
 		isExporting = true;
 		try {
 			const exportData = {
-				version: '2.0.0',
-				settings,
-				wallpapers: $wallpaperStore,
+				version: '2.1.0',
+				timestamp: new Date().toISOString(),
+				settings: settings,
 				bookmarks: $bookmarkStore,
-				exportedAt: Date.now(),
-				includes3D: true
+				wallpapers: $wallpaperStore
 			};
 			
-			const blob = new Blob([JSON.stringify(exportData, null, 2)], {
-				type: 'application/json'
-			});
-			
+			const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
 			const url = URL.createObjectURL(blob);
-			const link = document.createElement('a');
-			link.href = url;
-			link.download = `startpage-settings-${new Date().toISOString().split('T')[0]}.json`;
-			link.click();
-			
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `particle-nexus-settings-${Date.now()}.json`;
+			a.click();
 			URL.revokeObjectURL(url);
+		} catch (error) {
+			console.error('Failed to export settings:', error);
 		} finally {
 			isExporting = false;
 		}
 	}
 	
 	function handleImportFile(event: Event) {
-		const file = (event.target as HTMLInputElement).files?.[0];
+		const target = event.target as HTMLInputElement;
+		const file = target.files?.[0];
 		if (!file) return;
 		
 		const reader = new FileReader();
@@ -269,6 +229,7 @@
 			}
 			showImportDialog = false;
 			importData = '';
+			fileInput.value = '';
 		} catch (error) {
 			console.error('Failed to import settings:', error);
 		}
@@ -279,7 +240,57 @@
 		showResetConfirm = false;
 	}
 	
+	function handleKeyDown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			if (showResetConfirm) {
+				showResetConfirm = false;
+			} else if (showImportDialog) {
+				showImportDialog = false;
+			} else {
+				dispatch('close');
+			}
+		}
+	}
+	
+	function handleModalKeyDown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			if (showResetConfirm) {
+				showResetConfirm = false;
+			} else if (showImportDialog) {
+				showImportDialog = false;
+			}
+		}
+	}
+	
+	function trapFocus(event: KeyboardEvent) {
+		if (event.key !== 'Tab') return;
+		
+		const focusableElements = panelElement?.querySelectorAll(
+			'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+		);
+		
+		if (!focusableElements?.length) return;
+		
+		const firstElement = focusableElements[0] as HTMLElement;
+		const lastElement = focusableElements[focusableElements.length - 1] as HTMLElement;
+		
+		if (event.shiftKey) {
+			if (document.activeElement === firstElement) {
+				event.preventDefault();
+				lastElement.focus();
+			}
+		} else {
+			if (document.activeElement === lastElement) {
+				event.preventDefault();
+				firstElement.focus();
+			}
+		}
+	}
+	
 	onMount(async () => {
+		focusedElementBeforeModal = document.activeElement as HTMLElement;
+		
 		modalScale.set(1);
 		modalOpacity.set(1);
 		backdropBlur.set(10);
@@ -288,10 +299,12 @@
 		
 		if (browser) {
 			performanceMonitor = new PerformanceMonitor();
-			performanceMonitor.start();
+			performanceUpdateInterval = setInterval(updatePerformanceStats, 1000);
 		}
 		
 		document.body.style.overflow = 'hidden';
+		await tick();
+		panelElement?.focus();
 		
 		return () => {
 			document.body.style.overflow = '';
@@ -300,78 +313,120 @@
 	
 	onDestroy(() => {
 		if (performanceMonitor) {
-			performanceMonitor.stop();
+			performanceMonitor.destroy();
+		}
+		if (performanceUpdateInterval) {
+			clearInterval(performanceUpdateInterval);
 		}
 		document.body.style.overflow = '';
+		
+		if (focusedElementBeforeModal) {
+			focusedElementBeforeModal.focus();
+		}
 	});
 </script>
+
+<svelte:window on:keydown={handleKeyDown} />
 
 <div 
 	class="settings-modal" 
 	style="backdrop-filter: blur({$backdropBlur}px)"
 	on:click={() => dispatch('close')}
+	on:keydown={handleKeyDown}
+	role="dialog"
+	aria-modal="true"
+	aria-labelledby="settings-title"
 >
 	<div 
 		class="settings-panel"
 		style="transform: scale({$modalScale}); opacity: {$modalOpacity}"
 		on:click|stopPropagation
+		on:keydown={trapFocus}
 		bind:this={panelElement}
+		role="document"
+		tabindex="-1"
 	>
 		<div class="panel-header">
 			<div class="header-content">
-				<h1>Settings</h1>
-				<input 
-					type="text" 
-					placeholder="Search settings..." 
-					class="search-input"
-					bind:value={searchQuery}
-				/>
+				<h1 id="settings-title">Settings</h1>
+				<label class="search-container">
+					<span class="sr-only">Search settings</span>
+					<input 
+						type="text" 
+						placeholder="Search settings..." 
+						class="search-input"
+						bind:value={searchQuery}
+						aria-label="Search settings"
+					/>
+				</label>
 			</div>
-			<button class="close-button" on:click={() => dispatch('close')}>
-				<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+			<button 
+				class="close-button" 
+				on:click={() => dispatch('close')}
+				aria-label="Close settings panel"
+			>
+				<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
 					<path d="m6 6 12 12M6 18 18 6"/>
 				</svg>
 			</button>
 		</div>
 		
 		<div class="panel-body">
-			<nav class="settings-nav">
+			<nav class="settings-nav" role="tablist" aria-label="Settings categories">
 				{#each filteredTabs as tab}
 					<button 
 						class="nav-tab" 
 						class:active={activeTab === tab.id}
 						on:click={() => switchTab(tab.id)}
+						role="tab"
+						aria-selected={activeTab === tab.id}
+						aria-controls="panel-{tab.id}"
+						id="tab-{tab.id}"
 					>
-						<span class="tab-icon">{tab.icon}</span>
+						<span class="tab-icon" aria-hidden="true">{tab.icon}</span>
 						{tab.label}
 					</button>
 				{/each}
 			</nav>
 			
-			<main class="settings-content" style="transform: translateX({$tabSlideOffset}px)">
+			<main 
+				class="settings-content" 
+				style="transform: translateX({$tabSlideOffset}px)"
+				role="tabpanel"
+				aria-labelledby="tab-{activeTab}"
+				id="panel-{activeTab}"
+			>
 				{#if activeTab === 'general'}
 					<div class="settings-section">
 						<div class="section-card">
 							<h3>General Settings</h3>
 							<div class="setting-row">
-								<label>
+								<label class="setting-label">
 									<span>Show welcome message on startup</span>
 									<input 
 										type="checkbox" 
 										checked={settings?.general?.showWelcome !== false}
-										on:change={(e) => updateSetting('general.showWelcome', e.target.checked)}
+										on:change={(e) => updateSetting('general.showWelcome', e.currentTarget.checked)}
+										aria-describedby="welcome-desc"
 									/>
 								</label>
+								<div id="welcome-desc" class="setting-description">
+									Display a welcome message when the application starts
+								</div>
 							</div>
 							<div class="setting-row">
-								<label>
+								<label class="setting-label">
 									<span>Auto-save settings</span>
 									<input 
 										type="checkbox" 
 										checked={settings?.general?.autoSave !== false}
-										on:change={(e) => updateSetting('general.autoSave', e.target.checked)}
+										on:change={(e) => updateSetting('general.autoSave', e.currentTarget.checked)}
+										aria-describedby="autosave-desc"
 									/>
 								</label>
+								<div id="autosave-desc" class="setting-description">
+									Automatically save settings changes
+								</div>
 							</div>
 						</div>
 					</div>
@@ -380,27 +435,21 @@
 						<div class="section-card">
 							<h3>Wallpaper Settings</h3>
 							<div class="setting-row">
-								<label>
-									<span>Auto-cycle wallpapers</span>
-									<input 
-										type="checkbox" 
-										checked={settings?.wallpaper?.autoCycle !== false}
-										on:change={(e) => updateSetting('wallpaper.autoCycle', e.target.checked)}
-									/>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>Cycle interval (minutes)</span>
+								<label class="setting-label">
+									<span>Wallpaper opacity</span>
 									<input 
 										type="range" 
-										min="1" 
-										max="60" 
-										value={settings?.wallpaper?.cycleInterval || 10}
-										on:input={(e) => updateSetting('wallpaper.cycleInterval', parseInt(e.target.value))}
+										min="0" 
+										max="100" 
+										value={settings?.wallpaper?.opacity || 80}
+										on:input={(e) => updateSetting('wallpaper.opacity', parseInt(e.currentTarget.value))}
+										aria-describedby="opacity-desc"
 									/>
-									<span class="range-value">{settings?.wallpaper?.cycleInterval || 10}m</span>
+									<span class="range-value">{settings?.wallpaper?.opacity || 80}%</span>
 								</label>
+								<div id="opacity-desc" class="setting-description">
+									Controls the transparency of the background wallpaper
+								</div>
 							</div>
 						</div>
 					</div>
@@ -409,116 +458,60 @@
 						<div class="section-card">
 							<h3>Particle System</h3>
 							<div class="setting-row">
-								<label>
+								<label class="setting-label">
 									<span>Enable particles</span>
 									<input 
 										type="checkbox" 
 										checked={settings?.particles?.enabled !== false}
-										on:change={(e) => updateSetting('particles.enabled', e.target.checked)}
+										on:change={(e) => updateSetting('particles.enabled', e.currentTarget.checked)}
 									/>
 								</label>
 							</div>
 							<div class="setting-row">
-								<label>
+								<label class="setting-label">
 									<span>Particle count</span>
 									<input 
 										type="range" 
 										min="10" 
 										max="200" 
-										value={settings?.particles?.count || 80}
-										on:input={(e) => updateSetting('particles.count', parseInt(e.target.value))}
+										value={settings?.particles?.count || 50}
+										on:input={(e) => updateSetting('particles.count', parseInt(e.currentTarget.value))}
 									/>
-									<span class="range-value">{settings?.particles?.count || 80}</span>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>Connection distance</span>
-									<input 
-										type="range" 
-										min="50" 
-										max="200" 
-										value={settings?.particles?.connectionDistance || 120}
-										on:input={(e) => updateSetting('particles.connectionDistance', parseInt(e.target.value))}
-									/>
-									<span class="range-value">{settings?.particles?.connectionDistance || 120}px</span>
-								</label>
-							</div>
-						</div>
-					</div>
-				{:else if activeTab === 'bookmarks'}
-					<div class="settings-section">
-						<div class="section-card">
-							<h3>Bookmark Management</h3>
-							<div class="setting-row">
-								<label>
-									<span>Auto-detect favicons</span>
-									<input 
-										type="checkbox" 
-										checked={settings?.bookmarks?.autoFavicon !== false}
-										on:change={(e) => updateSetting('bookmarks.autoFavicon', e.target.checked)}
-									/>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>Show bookmark descriptions</span>
-									<input 
-										type="checkbox" 
-										checked={settings?.bookmarks?.showDescriptions !== false}
-										on:change={(e) => updateSetting('bookmarks.showDescriptions', e.target.checked)}
-									/>
+									<span class="range-value">{settings?.particles?.count || 50}</span>
 								</label>
 							</div>
 						</div>
 					</div>
 				{:else if activeTab === 'objects3d'}
 					<div class="settings-section">
-						{#if !webGLSupported}
-							<div class="section-card warning">
-								<h3>⚠️ WebGL Not Supported</h3>
-								<p>Your browser doesn't support WebGL, which is required for 3D objects. The page will automatically fall back to 2D icons.</p>
-								<div class="webgl-info">
-									<button class="action-button" on:click={checkWebGLSupport}>
-										Recheck WebGL Support
-									</button>
-								</div>
-							</div>
-						{/if}
-						
 						<div class="section-card">
-							<h3>3D Object Settings</h3>
+							<h3>3D Objects</h3>
 							<div class="setting-row">
-								<label>
+								<label class="setting-label">
 									<span>Enable 3D objects</span>
 									<input 
 										type="checkbox" 
 										checked={threeDSettings.enabled}
-										disabled={!webGLSupported}
-										on:change={(e) => updateSetting('objects3d.enabled', e.target.checked)}
+										on:change={(e) => updateSetting('objects3d.enabled', e.currentTarget.checked)}
 									/>
 								</label>
 							</div>
-							
-							<div class="setting-group">
-								<h4>Performance Preset</h4>
-								<div class="preset-buttons">
-									{#each ['low', 'medium', 'high', 'ultra'] as preset}
-										<button 
-											class="preset-button"
-											class:active={threeDPerformanceMode === preset}
-											disabled={!threeDSettings.enabled}
-											on:click={() => apply3DPerformancePreset(preset)}
-										>
-											{preset.charAt(0).toUpperCase() + preset.slice(1)}
-										</button>
-									{/each}
-								</div>
-							</div>
-							
 							{#if threeDSettings.enabled}
 								<div class="setting-row">
-									<label>
+									<label class="setting-label">
+										<span>Performance mode</span>
+										<select 
+											value={threeDSettings.performanceMode}
+											on:change={(e) => updateSetting('objects3d.performanceMode', e.currentTarget.value)}
+										>
+											<option value="low">Low</option>
+											<option value="medium">Medium</option>
+											<option value="high">High</option>
+										</select>
+									</label>
+								</div>
+								<div class="setting-row">
+									<label class="setting-label">
 										<span>Global scale</span>
 										<input 
 											type="range" 
@@ -526,150 +519,12 @@
 											max="2.0" 
 											step="0.1"
 											value={threeDSettings.globalScale}
-											on:input={(e) => updateSetting('objects3d.globalScale', parseFloat(e.target.value))}
+											on:input={(e) => updateSetting('objects3d.globalScale', parseFloat(e.currentTarget.value))}
 										/>
-										<span class="range-value">{threeDSettings.globalScale}×</span>
-									</label>
-								</div>
-								
-								<div class="setting-row">
-									<label>
-										<span>Animation speed</span>
-										<input 
-											type="range" 
-											min="0.2" 
-											max="3.0" 
-											step="0.1"
-											value={threeDSettings.animationSpeed}
-											on:input={(e) => updateSetting('objects3d.animationSpeed', parseFloat(e.target.value))}
-										/>
-										<span class="range-value">{threeDSettings.animationSpeed}×</span>
-									</label>
-								</div>
-								
-								<div class="setting-row">
-									<label>
-										<span>Enable animations</span>
-										<input 
-											type="checkbox" 
-											checked={threeDSettings.enableAnimations}
-											on:change={(e) => updateSetting('objects3d.enableAnimations', e.target.checked)}
-										/>
-									</label>
-								</div>
-								
-								<div class="setting-row">
-									<label>
-										<span>Enable glow effects</span>
-										<input 
-											type="checkbox" 
-											checked={threeDSettings.enableGlow}
-											on:change={(e) => updateSetting('objects3d.enableGlow', e.target.checked)}
-										/>
-									</label>
-								</div>
-								
-								<div class="setting-row">
-									<label>
-										<span>Enable shadows</span>
-										<input 
-											type="checkbox" 
-											checked={threeDSettings.enableShadows}
-											on:change={(e) => updateSetting('objects3d.enableShadows', e.target.checked)}
-										/>
+										<span class="range-value">{threeDSettings.globalScale.toFixed(1)}x</span>
 									</label>
 								</div>
 							{/if}
-						</div>
-						
-						{#if threeDSettings.enabled}
-							<div class="section-card">
-								<h3>Object Browser</h3>
-								<div class="object-browser">
-									<div class="browser-controls">
-										<select bind:value={objectBrowserCategory}>
-											<option value="all">All Categories</option>
-											{#each OBJECT_CATEGORIES as category}
-												<option value={category.id}>{category.name}</option>
-											{/each}
-										</select>
-									</div>
-									
-									<div class="object-grid">
-										{#each filteredObjects.slice(0, 12) as objectConfig}
-											<button 
-												class="object-card"
-												class:selected={selectedObject3D?.id === objectConfig.id}
-												on:click={() => selectObject(objectConfig)}
-											>
-												<div class="object-preview">
-													<Object3D 
-														config={objectConfig}
-														scale={0.8}
-														enableAnimation={false}
-														staticPreview={true}
-													/>
-												</div>
-												<div class="object-info">
-													<span class="object-name">{objectConfig.name}</span>
-													<span class="object-complexity">{objectConfig.complexity}</span>
-												</div>
-											</button>
-										{/each}
-									</div>
-									
-									{#if selectedObject3D}
-										<div class="preview-section">
-											<h4>Live Preview</h4>
-											<div class="live-preview" style="transform: scale({$previewScale})">
-												<Object3D 
-													bind:this={object3DPreviewRef}
-													config={selectedObject3D}
-													scale={threeDSettings.globalScale}
-													enableAnimation={threeDSettings.enableAnimations}
-													animationSpeed={threeDSettings.animationSpeed}
-													enableGlow={threeDSettings.enableGlow}
-													enableShadows={threeDSettings.enableShadows}
-													previewMode={true}
-												/>
-											</div>
-											<p class="preview-description">{selectedObject3D.description}</p>
-										</div>
-									{/if}
-								</div>
-							</div>
-						{/if}
-					</div>
-				{:else if activeTab === 'appearance'}
-					<div class="settings-section">
-						<div class="section-card">
-							<h3>Visual Appearance</h3>
-							<div class="setting-row">
-								<label>
-									<span>UI opacity</span>
-									<input 
-										type="range" 
-										min="20" 
-										max="100" 
-										value={settings?.ui?.opacity || 90}
-										on:input={(e) => updateSetting('ui.opacity', parseInt(e.target.value))}
-									/>
-									<span class="range-value">{settings?.ui?.opacity || 90}%</span>
-								</label>
-							</div>
-							<div class="setting-row">
-								<label>
-									<span>Blur intensity</span>
-									<input 
-										type="range" 
-										min="0" 
-										max="20" 
-										value={settings?.ui?.blurIntensity || 8}
-										on:input={(e) => updateSetting('ui.blurIntensity', parseInt(e.target.value))}
-									/>
-									<span class="range-value">{settings?.ui?.blurIntensity || 8}px</span>
-								</label>
-							</div>
 						</div>
 					</div>
 				{:else if activeTab === 'performance'}
@@ -679,7 +534,7 @@
 							<div class="performance-stats">
 								<div class="stat-item">
 									<span class="stat-label">FPS:</span>
-									<span class="stat-value" class:warning={performanceStats.fps < 30}>{performanceStats.fps}</span>
+									<span class="stat-value">{performanceStats.fps}</span>
 								</div>
 								<div class="stat-item">
 									<span class="stat-label">Memory:</span>
@@ -694,26 +549,12 @@
 									<span class="stat-value">{performanceStats.objects3D}</span>
 								</div>
 							</div>
-						</div>
-					</div>
-				{:else if activeTab === 'keyboard'}
-					<div class="settings-section">
-						<div class="section-card">
-							<h3>Keyboard Shortcuts</h3>
-							<div class="shortcut-list">
-								<div class="shortcut-item">
-									<span>Open search:</span>
-									<kbd>Ctrl + K</kbd>
+							{#if !webGLSupported}
+								<div class="section-card warning">
+									<h4>⚠️ WebGL Not Supported</h4>
+									<p>Your browser or device doesn't support WebGL. 3D features will be limited.</p>
 								</div>
-								<div class="shortcut-item">
-									<span>Open settings:</span>
-									<kbd>Ctrl + ,</kbd>
-								</div>
-								<div class="shortcut-item">
-									<span>New bookmark:</span>
-									<kbd>Ctrl + B</kbd>
-								</div>
-							</div>
+							{/if}
 						</div>
 					</div>
 				{:else if activeTab === 'data'}
@@ -721,11 +562,16 @@
 						<div class="section-card">
 							<h3>Data Management</h3>
 							<div class="data-actions">
-								<button class="action-button export" on:click={exportSettings} disabled={isExporting}>
+								<button 
+									class="action-button export" 
+									on:click={exportSettings} 
+									disabled={isExporting}
+									aria-label="Export all settings to file"
+								>
 									{#if isExporting}
-										<span class="spinner"></span>
+										<span class="spinner" aria-hidden="true"></span>
 									{:else}
-										<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+										<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
 											<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
 											<polyline points="7,10 12,15 17,10"/>
 											<line x1="12" y1="15" x2="12" y2="3"/>
@@ -740,9 +586,14 @@
 									style="display: none" 
 									bind:this={fileInput}
 									on:change={handleImportFile}
+									aria-label="Import settings file"
 								/>
-								<button class="action-button import" on:click={() => fileInput.click()}>
-									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<button 
+									class="action-button import" 
+									on:click={() => fileInput.click()}
+									aria-label="Import settings from file"
+								>
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
 										<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
 										<polyline points="17,8 12,3 7,8"/>
 										<line x1="12" y1="3" x2="12" y2="15"/>
@@ -750,8 +601,12 @@
 									Import Settings
 								</button>
 								
-								<button class="action-button reset" on:click={() => showResetConfirm = true}>
-									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<button 
+									class="action-button reset" 
+									on:click={() => showResetConfirm = true}
+									aria-label="Reset all settings to defaults"
+								>
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
 										<polyline points="1,4 1,10 7,10"/>
 										<path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
 									</svg>
@@ -767,32 +622,90 @@
 </div>
 
 {#if showResetConfirm}
-	<div class="confirm-modal" on:click={() => showResetConfirm = false}>
-		<div class="confirm-dialog" on:click|stopPropagation>
-			<h3>Reset all settings?</h3>
+	<div 
+		class="confirm-modal" 
+		on:click={() => showResetConfirm = false}
+		on:keydown={handleModalKeyDown}
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="reset-title"
+	>
+		<div 
+			class="confirm-dialog" 
+			on:click|stopPropagation
+			role="document"
+		>
+			<h3 id="reset-title">Reset all settings?</h3>
 			<p>This will restore all settings to their default values. This action cannot be undone.</p>
 			<div class="confirm-actions">
-				<button class="cancel-button" on:click={() => showResetConfirm = false}>Cancel</button>
-				<button class="confirm-button" on:click={resetToDefaults}>Reset</button>
+				<button 
+					class="cancel-button" 
+					on:click={() => showResetConfirm = false}
+					aria-label="Cancel reset operation"
+				>
+					Cancel
+				</button>
+				<button 
+					class="confirm-button" 
+					on:click={resetToDefaults}
+					aria-label="Confirm reset to defaults"
+				>
+					Reset
+				</button>
 			</div>
 		</div>
 	</div>
 {/if}
 
 {#if showImportDialog}
-	<div class="confirm-modal" on:click={() => showImportDialog = false}>
-		<div class="confirm-dialog" on:click|stopPropagation>
-			<h3>Import Settings</h3>
+	<div 
+		class="confirm-modal" 
+		on:click={() => showImportDialog = false}
+		on:keydown={handleModalKeyDown}
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="import-title"
+	>
+		<div 
+			class="confirm-dialog" 
+			on:click|stopPropagation
+			role="document"
+		>
+			<h3 id="import-title">Import Settings</h3>
 			<p>This will replace your current settings. Are you sure?</p>
 			<div class="confirm-actions">
-				<button class="cancel-button" on:click={() => showImportDialog = false}>Cancel</button>
-				<button class="confirm-button" on:click={importSettings}>Import</button>
+				<button 
+					class="cancel-button" 
+					on:click={() => showImportDialog = false}
+					aria-label="Cancel import operation"
+				>
+					Cancel
+				</button>
+				<button 
+					class="confirm-button" 
+					on:click={importSettings}
+					aria-label="Confirm import settings"
+				>
+					Import
+				</button>
 			</div>
 		</div>
 	</div>
 {/if}
 
 <style>
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
 	.settings-modal {
 		position: fixed;
 		top: 0;
@@ -821,6 +734,7 @@
 		flex-direction: column;
 		overflow: hidden;
 		box-shadow: 0 32px 64px rgba(0, 0, 0, 0.4);
+		outline: none;
 	}
 	
 	.panel-header {
@@ -845,6 +759,10 @@
 		color: white;
 	}
 	
+	.search-container {
+		display: block;
+	}
+	
 	.search-input {
 		padding: 8px 16px;
 		border: 1px solid rgba(255, 255, 255, 0.2);
@@ -857,7 +775,8 @@
 	}
 	
 	.search-input:focus {
-		outline: none;
+		outline: 2px solid rgba(255, 255, 255, 0.8);
+		outline-offset: 2px;
 		border-color: rgba(255, 255, 255, 0.4);
 		box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1);
 	}
@@ -882,6 +801,11 @@
 	.close-button:hover {
 		color: white;
 		background: rgba(255, 255, 255, 0.1);
+	}
+	
+	.close-button:focus {
+		outline: 2px solid rgba(255, 255, 255, 0.8);
+		outline-offset: 2px;
 	}
 	
 	.panel-body {
@@ -918,7 +842,12 @@
 		color: white;
 	}
 	
-	.nav-tab.active {
+	.nav-tab:focus {
+		outline: 2px solid rgba(255, 255, 255, 0.8);
+		outline-offset: -2px;
+	}
+	
+	.nav-tab[aria-selected="true"] {
 		background: rgba(255, 255, 255, 0.15);
 		color: white;
 		border-right: 3px solid rgba(255, 255, 255, 0.8);
@@ -970,25 +899,35 @@
 		margin-bottom: 20px;
 	}
 	
-	.setting-row label {
+	.setting-label {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: 16px;
 		color: rgba(255, 255, 255, 0.9);
 		font-size: 14px;
+		cursor: pointer;
+	}
+	
+	.setting-description {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.6);
+		margin-top: 4px;
+		margin-left: 0;
 	}
 	
 	.setting-row input[type="checkbox"] {
 		width: 18px;
 		height: 18px;
 		accent-color: rgba(255, 255, 255, 0.8);
+		cursor: pointer;
 	}
 	
 	.setting-row input[type="range"] {
 		flex: 1;
 		max-width: 150px;
 		margin-right: 12px;
+		cursor: pointer;
 	}
 	
 	.setting-row select {
@@ -998,6 +937,12 @@
 		background: rgba(255, 255, 255, 0.1);
 		color: white;
 		font-size: 14px;
+		cursor: pointer;
+	}
+	
+	.setting-row select:focus {
+		outline: 2px solid rgba(255, 255, 255, 0.8);
+		outline-offset: 2px;
 	}
 	
 	.range-value {
@@ -1007,202 +952,31 @@
 		color: rgba(255, 255, 255, 0.8);
 	}
 	
-	.setting-group {
-		margin-bottom: 24px;
-	}
-	
-	.preset-buttons {
-		display: flex;
-		gap: 8px;
-		margin-top: 8px;
-	}
-	
-	.preset-button {
-		padding: 8px 16px;
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		border-radius: 8px;
-		background: rgba(255, 255, 255, 0.1);
-		color: rgba(255, 255, 255, 0.8);
-		font-size: 12px;
-		cursor: pointer;
-		transition: all 0.3s ease;
-	}
-	
-	.preset-button:hover:not(:disabled) {
-		background: rgba(255, 255, 255, 0.15);
-		color: white;
-	}
-	
-	.preset-button.active {
-		background: rgba(255, 255, 255, 0.2);
-		color: white;
-		border-color: rgba(255, 255, 255, 0.4);
-	}
-	
-	.preset-button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	
-	.object-browser {
-		margin-top: 16px;
-	}
-	
-	.browser-controls {
-		margin-bottom: 16px;
-	}
-	
-	.browser-controls select {
-		width: 100%;
-		max-width: 200px;
-		padding: 8px 12px;
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		border-radius: 8px;
-		background: rgba(255, 255, 255, 0.1);
-		color: white;
-		font-size: 14px;
-	}
-	
-	.object-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-		gap: 12px;
-		margin-bottom: 24px;
-	}
-	
-	.object-card {
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		border-radius: 12px;
-		padding: 12px;
-		cursor: pointer;
-		transition: all 0.3s ease;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 8px;
-	}
-	
-	.object-card:hover {
-		background: rgba(255, 255, 255, 0.1);
-		border-color: rgba(255, 255, 255, 0.3);
-		transform: translateY(-2px);
-	}
-	
-	.object-card.selected {
-		background: rgba(255, 255, 255, 0.15);
-		border-color: rgba(255, 255, 255, 0.4);
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-	}
-	
-	.object-preview {
-		width: 60px;
-		height: 60px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: rgba(255, 255, 255, 0.05);
-		border-radius: 8px;
-	}
-	
-	.object-info {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 2px;
-	}
-	
-	.object-name {
-		font-size: 11px;
-		color: white;
-		text-align: center;
-		font-weight: 500;
-	}
-	
-	.object-complexity {
-		font-size: 9px;
-		color: rgba(255, 255, 255, 0.6);
-		text-transform: uppercase;
-	}
-	
-	.preview-section {
-		border-top: 1px solid rgba(255, 255, 255, 0.1);
-		padding-top: 20px;
-	}
-	
-	.live-preview {
-		width: 120px;
-		height: 120px;
-		margin: 16px auto;
-		background: rgba(255, 255, 255, 0.05);
-		border-radius: 12px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		transition: transform 0.3s ease;
-	}
-	
-	.preview-description {
-		font-size: 12px;
-		color: rgba(255, 255, 255, 0.7);
-		text-align: center;
-		margin: 0;
-		line-height: 1.4;
-	}
-	
 	.performance-stats {
-		display: flex;
-		gap: 24px;
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+		gap: 16px;
 		margin-bottom: 20px;
-		padding: 16px;
-		background: rgba(255, 255, 255, 0.05);
-		border-radius: 12px;
-		flex-wrap: wrap;
 	}
 	
 	.stat-item {
 		display: flex;
-		flex-direction: column;
+		justify-content: space-between;
 		align-items: center;
-		gap: 4px;
+		padding: 12px;
+		background: rgba(255, 255, 255, 0.05);
+		border-radius: 8px;
+		border: 1px solid rgba(255, 255, 255, 0.1);
 	}
 	
 	.stat-label {
 		font-size: 12px;
-		color: rgba(255, 255, 255, 0.6);
-		text-transform: uppercase;
+		color: rgba(255, 255, 255, 0.7);
 	}
 	
 	.stat-value {
-		font-size: 18px;
-		font-weight: 600;
-		color: white;
-	}
-	
-	.stat-value.warning {
-		color: #ff6b6b;
-	}
-	
-	.shortcut-list {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-	
-	.shortcut-item {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		color: rgba(255, 255, 255, 0.8);
 		font-size: 14px;
-	}
-	
-	kbd {
-		background: rgba(255, 255, 255, 0.1);
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		border-radius: 4px;
-		padding: 4px 8px;
-		font-size: 12px;
+		font-weight: 600;
 		color: white;
 	}
 	
@@ -1213,14 +987,14 @@
 	}
 	
 	.action-button {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 10px 16px;
+		padding: 12px 16px;
 		border: 1px solid rgba(255, 255, 255, 0.2);
 		border-radius: 8px;
 		background: rgba(255, 255, 255, 0.1);
-		color: white;
+		color: rgba(255, 255, 255, 0.8);
+		display: flex;
+		align-items: center;
+		gap: 8px;
 		font-size: 14px;
 		cursor: pointer;
 		transition: all 0.3s ease;
@@ -1229,6 +1003,12 @@
 	.action-button:hover:not(:disabled) {
 		background: rgba(255, 255, 255, 0.15);
 		border-color: rgba(255, 255, 255, 0.3);
+		color: white;
+	}
+	
+	.action-button:focus {
+		outline: 2px solid rgba(255, 255, 255, 0.8);
+		outline-offset: 2px;
 	}
 	
 	.action-button:disabled {
@@ -1262,10 +1042,6 @@
 	
 	@keyframes spin {
 		to { transform: rotate(360deg); }
-	}
-	
-	.webgl-info {
-		margin-top: 16px;
 	}
 	
 	.confirm-modal {
@@ -1317,6 +1093,7 @@
 		color: white;
 		cursor: pointer;
 		transition: all 0.3s ease;
+		font-size: 14px;
 	}
 	
 	.confirm-button {
@@ -1326,5 +1103,48 @@
 	
 	.cancel-button:hover, .confirm-button:hover {
 		background: rgba(255, 255, 255, 0.15);
+	}
+	
+	.cancel-button:focus, .confirm-button:focus {
+		outline: 2px solid rgba(255, 255, 255, 0.8);
+		outline-offset: 2px;
+	}
+
+	@media (max-width: 768px) {
+		.settings-panel {
+			width: 95vw;
+			height: 90vh;
+		}
+		
+		.panel-body {
+			flex-direction: column;
+		}
+		
+		.settings-nav {
+			width: 100%;
+			max-height: 120px;
+			overflow-x: auto;
+			overflow-y: hidden;
+			display: flex;
+			border-right: none;
+			border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+		}
+		
+		.nav-tab {
+			white-space: nowrap;
+			min-width: auto;
+		}
+		
+		.settings-content {
+			padding: 16px;
+		}
+		
+		.data-actions {
+			flex-direction: column;
+		}
+		
+		.performance-stats {
+			grid-template-columns: repeat(2, 1fr);
+		}
 	}
 </style>

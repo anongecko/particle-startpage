@@ -1,1129 +1,1210 @@
 <script lang="ts">
 	import { onMount, onDestroy, createEventDispatcher, tick } from 'svelte';
 	import { browser } from '$app/environment';
-	import { tweened, spring } from 'svelte/motion';
-	import { cubicOut, backOut } from 'svelte/easing';
-	import { bookmarkStore } from '$stores/bookmarks';
-	import { debounce } from '$lib/utils';
+	import { get } from 'svelte/store';
+	import { fade, scale, fly } from 'svelte/transition';
+	import { cubicOut, elasticOut } from 'svelte/easing';
 	
-	export let bookmark: any;
-	export let layout: 'grid' | 'list' | 'icon' = 'grid';
-	export let size: 'small' | 'medium' | 'large' = 'medium';
-	export let showFavicon: boolean = true;
-	export let showTitle: boolean = true;
-	export let dominantColor: string = '#ffffff';
-	export let isDragging: boolean = false;
-	export let dragIndex: number = -1;
-	export let index: number = 0;
+	import type { BookmarkCategory, BookmarkItem } from '$stores/bookmarks';
+	import { bookmarkStore } from '$stores/bookmarks';
+	import { settings } from '$stores/settings';
+	import { colorStore } from '$stores/color';
+	
+	export let category: BookmarkCategory;
+	export let visible: boolean = false;
+	
+	let modalElement: HTMLElement;
+	let searchInput: HTMLInputElement;
+	let bookmarksContainer: HTMLElement;
+	let isClosing = false;
+	let searchQuery = '';
+	let showLabels = false;
+	let isDragging = false;
+	let draggedBookmark: BookmarkItem | null = null;
+	let dropTarget: BookmarkItem | null = null;
+	let hoverTimeout: NodeJS.Timeout | null = null;
+	let focusedElementBeforeModal: HTMLElement | null = null;
+	
+	let dragStartPosition = { x: 0, y: 0 };
+	let dragOffset = { x: 0, y: 0 };
+	let draggedElement: HTMLElement | null = null;
+	let dropZones = new Set<string>();
+	
+	let filteredBookmarks: BookmarkItem[] = [];
+	let searchActive = false;
+	let typingTimeout: NodeJS.Timeout | null = null;
+	
+	let loadedFavicons = new Set<string>();
+	let failedFavicons = new Set<string>();
+	let visibleBookmarks = new Set<string>();
+	let intersectionObserver: IntersectionObserver | null = null;
 	
 	const dispatch = createEventDispatcher();
 	
-	let itemElement: HTMLElement;
-	let contextMenu: HTMLElement;
-	let editDialog: HTMLElement;
-	let fileInput: HTMLInputElement;
-	let isHovered = false;
-	let isContextMenuOpen = false;
-	let showEditDialog = false;
-	let isLoading = false;
-	let faviconError = false;
-	let contextMenuPosition = { x: 0, y: 0 };
-	let customIconUrl = '';
-	let editForm = {
-		name: bookmark.name || '',
-		url: bookmark.url || '',
-		customIcon: bookmark.customIcon || '',
-		useCustomIcon: !!bookmark.customIcon
-	};
-	
-	// Animation states
-	const hoverScale = spring(1, { stiffness: 0.4, damping: 0.8 });
-	const hoverLift = spring(0, { stiffness: 0.3, damping: 0.9 });
-	const dragScale = tweened(1, { duration: 200, easing: cubicOut });
-	const dragOpacity = tweened(1, { duration: 200, easing: cubicOut });
-	const editDialogScale = spring(0.8, { stiffness: 0.3, damping: 0.8 });
-	const editDialogOpacity = tweened(0, { duration: 300, easing: cubicOut });
-	
-	// Favicon cache
-	let faviconCache = new Map();
-	let faviconUrl = '';
-	
-	// Size configurations
-	const sizeConfig = {
-		small: { icon: 24, spacing: 8, fontSize: '11px', padding: '8px' },
-		medium: { icon: 32, spacing: 12, fontSize: '12px', padding: '12px' },
-		large: { icon: 40, spacing: 16, fontSize: '14px', padding: '16px' }
-	};
-	
-	$: config = sizeConfig[size];
-	$: adaptedColors = adaptColorsToBackground(dominantColor);
-	$: if (bookmark.customIcon) {
-		faviconUrl = bookmark.customIcon;
-		faviconError = false;
-	} else {
-		loadFavicon();
-	}
-	
-	function adaptColorsToBackground(bgColor: string) {
-		const bgLuminance = getLuminance(bgColor);
-		const isDark = bgLuminance < 0.5;
-		
-		return {
-			text: isDark ? 'rgba(255, 255, 255, 0.9)' : 'rgba(0, 0, 0, 0.9)',
-			textSecondary: isDark ? 'rgba(255, 255, 255, 0.7)' : 'rgba(0, 0, 0, 0.7)',
-			background: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
-			backgroundHover: isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
-			border: isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
-			shadow: isDark ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.2)'
-		};
-	}
-	
-	function getLuminance(hex: string): number {
-		const rgb = hexToRgb(hex);
-		if (!rgb) return 0.5;
-		
-		const { r, g, b } = rgb;
-		const [rs, gs, bs] = [r, g, b].map(c => {
-			c = c / 255;
-			return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-		});
-		
-		return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
-	}
-	
-	function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-		const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-		return result ? {
-			r: parseInt(result[1], 16),
-			g: parseInt(result[2], 16),
-			b: parseInt(result[3], 16)
-		} : null;
-	}
-	
-	async function loadFavicon() {
-		if (!bookmark.url) return;
-		
-		try {
-			const domain = new URL(bookmark.url).hostname;
-			const cacheKey = `favicon_${domain}`;
-			
-			// Check cache first
-			if (faviconCache.has(cacheKey)) {
-				faviconUrl = faviconCache.get(cacheKey);
-				return;
-			}
-			
-			// Try multiple favicon sources
-			const faviconSources = [
-				`https://icons.duckduckgo.com/ip3/${domain}.ico`,
-				`https://www.google.com/s2/favicons?domain=${domain}&sz=64`,
-				`https://${domain}/favicon.ico`,
-				`https://${domain}/apple-touch-icon.png`
-			];
-			
-			for (const source of faviconSources) {
-				try {
-					await testImageUrl(source);
-					faviconUrl = source;
-					faviconCache.set(cacheKey, source);
-					faviconError = false;
-					return;
-				} catch {
-					continue;
-				}
-			}
-			
-			// If all fail, use fallback
-			faviconError = true;
-		} catch (error) {
-			faviconError = true;
-		}
-	}
-	
-	function testImageUrl(url: string): Promise<void> {
-		return new Promise((resolve, reject) => {
-			const img = new Image();
-			img.onload = () => resolve();
-			img.onerror = () => reject();
-			img.src = url;
-		});
-	}
-	
-	function handleMouseEnter() {
-		if (isDragging) return;
-		
-		isHovered = true;
-		hoverScale.set(1.1);
-		hoverLift.set(-2);
-		
-		dispatch('hover', { bookmark, active: true });
-	}
-	
-	function handleMouseLeave() {
-		isHovered = false;
-		hoverScale.set(1);
-		hoverLift.set(0);
-		
-		dispatch('hover', { bookmark, active: false });
-	}
-	
-	function handleClick(event: MouseEvent) {
-		if (isDragging || event.detail === 2) return; // Ignore if dragging or double-click
-		
-		event.preventDefault();
-		window.open(bookmark.url, '_self');
-		
-		dispatch('click', { bookmark, event });
-		dispatch('interact', { type: 'click', bookmark });
-	}
-	
-	function handleDoubleClick(event: MouseEvent) {
-		if (isDragging) return;
-		
-		event.preventDefault();
-		window.open(bookmark.url, '_blank');
-		
-		dispatch('doubleClick', { bookmark, event });
-		dispatch('interact', { type: 'doubleClick', bookmark });
-	}
-	
-	function handleContextMenu(event: MouseEvent) {
-		event.preventDefault();
-		
-		contextMenuPosition = {
-			x: event.clientX,
-			y: event.clientY
-		};
-		
-		isContextMenuOpen = true;
-		dispatch('contextMenu', { bookmark, position: contextMenuPosition });
-		dispatch('interact', { type: 'contextMenu', bookmark });
-	}
-	
-	function handleDragStart(event: DragEvent) {
-		if (!event.dataTransfer) return;
-		
-		isDragging = true;
-		dragScale.set(0.95);
-		dragOpacity.set(0.7);
-		
-		event.dataTransfer.effectAllowed = 'move';
-		event.dataTransfer.setData('text/plain', JSON.stringify({
-			type: 'bookmark',
-			bookmark,
-			sourceIndex: index
-		}));
-		
-		dispatch('dragStart', { bookmark, index, event });
-	}
-	
-	function handleDragEnd(event: DragEvent) {
-		isDragging = false;
-		dragScale.set(1);
-		dragOpacity.set(1);
-		
-		dispatch('dragEnd', { bookmark, index, event });
-	}
-	
-	function handleDragOver(event: DragEvent) {
-		if (!event.dataTransfer) return;
-		
-		event.preventDefault();
-		event.dataTransfer.dropEffect = 'move';
-		
-		dispatch('dragOver', { bookmark, index, event });
-	}
-	
-	function handleDrop(event: DragEvent) {
-		if (!event.dataTransfer) return;
-		
-		event.preventDefault();
-		
-		try {
-			const dragData = JSON.parse(event.dataTransfer.getData('text/plain'));
-			if (dragData.type === 'bookmark') {
-				dispatch('drop', {
-					sourceBookmark: dragData.bookmark,
-					sourceIndex: dragData.sourceIndex,
-					targetBookmark: bookmark,
-					targetIndex: index,
-					event
-				});
-			}
-		} catch (error) {
-			console.warn('Invalid drag data:', error);
-		}
-	}
-	
-	function openEditDialog() {
-		editForm = {
-			name: bookmark.name || '',
-			url: bookmark.url || '',
-			customIcon: bookmark.customIcon || '',
-			useCustomIcon: !!bookmark.customIcon
-		};
-		
-		showEditDialog = true;
-		editDialogScale.set(1);
-		editDialogOpacity.set(1);
-		closeContextMenu();
-	}
-	
-	function closeEditDialog() {
-		editDialogScale.set(0.8);
-		editDialogOpacity.set(0);
-		setTimeout(() => {
-			showEditDialog = false;
-		}, 300);
-	}
-	
-	async function saveChanges() {
-		if (!editForm.name.trim() || !editForm.url.trim()) return;
-		
-		isLoading = true;
-		
-		try {
-			const updatedBookmark = {
-				...bookmark,
-				name: editForm.name.trim(),
-				url: editForm.url.trim(),
-				customIcon: editForm.useCustomIcon ? editForm.customIcon : null
-			};
-			
-			await bookmarkStore.updateBookmark(bookmark.id, updatedBookmark);
-			
-			// Update local bookmark data
-			Object.assign(bookmark, updatedBookmark);
-			
-			dispatch('update', { bookmark: updatedBookmark });
-			closeEditDialog();
-		} catch (error) {
-			console.error('Failed to save bookmark changes:', error);
-		} finally {
-			isLoading = false;
-		}
-	}
-	
-	function handleCustomIconUpload(event: Event) {
-		const file = (event.target as HTMLInputElement).files?.[0];
-		if (!file) return;
-		
-		if (!file.type.startsWith('image/')) {
-			alert('Please select a valid image file');
-			return;
-		}
-		
-		if (file.size > 2 * 1024 * 1024) { // 2MB limit
-			alert('Image file too large. Please select a file under 2MB');
-			return;
-		}
-		
-		const reader = new FileReader();
-		reader.onload = (e) => {
-			editForm.customIcon = e.target?.result as string;
-			editForm.useCustomIcon = true;
-		};
-		reader.readAsDataURL(file);
-	}
-	
-	function copyBookmarkUrl() {
-		if (navigator.clipboard) {
-			navigator.clipboard.writeText(bookmark.url);
-		} else {
-			// Fallback for older browsers
-			const textArea = document.createElement('textarea');
-			textArea.value = bookmark.url;
-			document.body.appendChild(textArea);
-			textArea.select();
-			document.execCommand('copy');
-			document.body.removeChild(textArea);
-		}
-		
-		closeContextMenu();
-		dispatch('interact', { type: 'copy', bookmark });
-	}
-	
-	function deleteBookmark() {
-		if (confirm(`Are you sure you want to delete "${bookmark.name}"?`)) {
-			bookmarkStore.deleteBookmark(bookmark.id);
-			dispatch('delete', { bookmark });
-		}
-		closeContextMenu();
-	}
-	
-	function openInNewTab() {
-		window.open(bookmark.url, '_blank');
-		closeContextMenu();
-		dispatch('interact', { type: 'openNewTab', bookmark });
-	}
-	
-	function closeContextMenu() {
-		isContextMenuOpen = false;
-	}
-	
-	function handleKeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape') {
-			if (showEditDialog) {
-				closeEditDialog();
-			} else if (isContextMenuOpen) {
-				closeContextMenu();
-			}
-		} else if (event.key === 'Enter' && showEditDialog) {
-			saveChanges();
-		}
-	}
+	$: currentSettings = get(settings);
+	$: colorPalette = get(colorStore);
+	$: showLabels = currentSettings.showBookmarkLabels || false;
+	$: filteredBookmarks = filterBookmarks(category.bookmarks, searchQuery);
+	$: modalBackgroundColor = colorPalette.darkest || '#1a1a1a';
+	$: modalBorderColor = colorPalette.accent || colorPalette.current || '#4a90e2';
+	$: modalTextColor = getContrastColor(modalBackgroundColor);
 	
 	onMount(() => {
-		if (browser) {
-			document.addEventListener('click', closeContextMenu);
-			document.addEventListener('keydown', handleKeydown);
-		}
+		if (!browser) return;
+		
+		focusedElementBeforeModal = document.activeElement as HTMLElement;
+		setupEventListeners();
+		setupIntersectionObserver();
+		
+		setTimeout(() => {
+			if (searchInput && visible) {
+				searchInput.focus();
+			}
+		}, 300);
+		
+		console.log('BookmarkModal initialized for category:', category.name);
 	});
 	
 	onDestroy(() => {
-		if (browser) {
-			document.removeEventListener('click', closeContextMenu);
-			document.removeEventListener('keydown', handleKeydown);
+		cleanup();
+		if (focusedElementBeforeModal) {
+			focusedElementBeforeModal.focus();
 		}
 	});
+	
+	function filterBookmarks(bookmarks: BookmarkItem[], query: string): BookmarkItem[] {
+		if (!query.trim()) return bookmarks;
+		
+		const searchTerm = query.toLowerCase();
+		return bookmarks.filter(bookmark => 
+			bookmark.title.toLowerCase().includes(searchTerm) ||
+			bookmark.url.toLowerCase().includes(searchTerm) ||
+			bookmark.description?.toLowerCase().includes(searchTerm) ||
+			bookmark.tags.some(tag => tag.toLowerCase().includes(searchTerm))
+		);
+	}
+	
+	function setupEventListeners(): void {
+		document.addEventListener('keydown', handleGlobalKeyDown);
+	}
+	
+	function handleGlobalKeyDown(event: KeyboardEvent): void {
+		if (!visible) return;
+		
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			closeModal();
+		} else if (event.key === 'Enter' && event.target === searchInput) {
+			event.preventDefault();
+			if (filteredBookmarks.length > 0) {
+				handleBookmarkActivate(filteredBookmarks[0], event);
+			}
+		}
+	}
+	
+	function handleSearchInput(event: InputEvent): void {
+		const target = event.target as HTMLInputElement;
+		searchQuery = target.value;
+		
+		if (typingTimeout) clearTimeout(typingTimeout);
+		
+		typingTimeout = setTimeout(() => {
+			if (searchQuery.trim()) {
+				try {
+					bookmarkStore.recordSearch?.(searchQuery);
+				} catch (error) {
+					console.warn('Failed to record search:', error);
+				}
+			}
+		}, 500);
+	}
+	
+	function clearSearch(): void {
+		searchQuery = '';
+		searchActive = false;
+		if (searchInput) {
+			searchInput.focus();
+		}
+	}
+	
+	function handleDragStart(bookmark: BookmarkItem, event: DragEvent): void {
+		isDragging = true;
+		draggedBookmark = bookmark;
+		
+		dragStartPosition = { x: event.clientX, y: event.clientY };
+		draggedElement = (event.target as HTMLElement).closest('.bookmark-item');
+		
+		if (draggedElement) {
+			const rect = draggedElement.getBoundingClientRect();
+			dragOffset = {
+				x: event.clientX - rect.left,
+				y: event.clientY - rect.top
+			};
+			
+			draggedElement.classList.add('dragging');
+			draggedElement.setAttribute('aria-grabbed', 'true');
+		}
+		
+		if (event.dataTransfer) {
+			event.dataTransfer.effectAllowed = 'move';
+			event.dataTransfer.setData('text/plain', bookmark.id);
+			event.dataTransfer.setData('application/x-bookmark', JSON.stringify(bookmark));
+		}
+		
+		dispatch('drag-start', { bookmark });
+	}
+	
+	function handleDragOver(bookmark: BookmarkItem, event: DragEvent): void {
+		if (!isDragging || !draggedBookmark || draggedBookmark.id === bookmark.id) return;
+		
+		event.preventDefault();
+		event.dataTransfer!.dropEffect = 'move';
+		
+		if (dropTarget?.id !== bookmark.id) {
+			dropTarget = bookmark;
+			
+			if (hoverTimeout) clearTimeout(hoverTimeout);
+			
+			hoverTimeout = setTimeout(() => {
+				if (dropTarget && draggedBookmark && dropTarget.id !== draggedBookmark.id) {
+					showFolderCreationHint(dropTarget);
+				}
+			}, 800);
+		}
+	}
+	
+	function handleDrop(bookmark: BookmarkItem, event: DragEvent): void {
+		if (!isDragging || !draggedBookmark || draggedBookmark.id === bookmark.id) return;
+		
+		event.preventDefault();
+		
+		const shouldCreateFolder = hoverTimeout !== null;
+		
+		if (shouldCreateFolder) {
+			createBookmarkFolder(draggedBookmark, bookmark);
+		} else {
+			reorderBookmarks(draggedBookmark, bookmark);
+		}
+		
+		endDrag();
+	}
+	
+	function handleDragEnd(): void {
+		endDrag();
+	}
+	
+	function endDrag(): void {
+		isDragging = false;
+		draggedBookmark = null;
+		dropTarget = null;
+		
+		if (hoverTimeout) {
+			clearTimeout(hoverTimeout);
+			hoverTimeout = null;
+		}
+		
+		if (draggedElement) {
+			draggedElement.classList.remove('dragging');
+			draggedElement.setAttribute('aria-grabbed', 'false');
+			draggedElement = null;
+		}
+		
+		dropZones.clear();
+		
+		// Remove folder hint classes
+		document.querySelectorAll('.folder-drop-target').forEach(el => {
+			el.classList.remove('folder-drop-target');
+		});
+	}
+	
+	function createBookmarkFolder(bookmark1: BookmarkItem, bookmark2: BookmarkItem): void {
+		const folderName = prompt('Enter folder name:', `${bookmark1.title} & ${bookmark2.title}`);
+		
+		if (folderName?.trim()) {
+			try {
+				bookmarkStore.createBookmarkFolder?.(category.id, [bookmark1.id, bookmark2.id], folderName);
+				dispatch('folder-created', { folder: folderName, bookmarks: [bookmark1, bookmark2] });
+			} catch (error) {
+				console.error('Failed to create bookmark folder:', error);
+			}
+		}
+	}
+	
+	function reorderBookmarks(bookmark: BookmarkItem, targetBookmark: BookmarkItem): void {
+		try {
+			bookmarkStore.reorderBookmarks?.(category.id, bookmark.id, targetBookmark.id);
+			dispatch('bookmark-reorder', { bookmark, target: targetBookmark });
+		} catch (error) {
+			console.error('Failed to reorder bookmarks:', error);
+		}
+	}
+	
+	function showFolderCreationHint(bookmark: BookmarkItem): void {
+		const element = document.querySelector(`[data-bookmark-id="${bookmark.id}"]`);
+		if (element) {
+			element.classList.add('folder-drop-target');
+			setTimeout(() => {
+				element.classList.remove('folder-drop-target');
+			}, 2000);
+		}
+	}
+	
+	function handleBookmarkClick(bookmark: BookmarkItem, event: MouseEvent): void {
+		handleBookmarkActivate(bookmark, event);
+	}
+	
+	function handleBookmarkKeyDown(bookmark: BookmarkItem, event: KeyboardEvent): void {
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			handleBookmarkActivate(bookmark, event);
+		} else if (event.key === 'Delete' || event.key === 'Backspace') {
+			event.preventDefault();
+			handleBookmarkDelete(bookmark);
+		}
+	}
+	
+	function handleBookmarkActivate(bookmark: BookmarkItem, event: MouseEvent | KeyboardEvent): void {
+		try {
+			bookmarkStore.recordBookmarkAccess?.(bookmark.id);
+		} catch (error) {
+			console.warn('Failed to record bookmark access:', error);
+		}
+		
+		const isModifiedClick = 'ctrlKey' in event ? (event.ctrlKey || event.metaKey) : false;
+		const isShiftClick = 'shiftKey' in event ? event.shiftKey : false;
+		
+		if (isModifiedClick || isShiftClick) {
+			window.open(bookmark.url, '_blank');
+		} else {
+			window.location.href = bookmark.url;
+		}
+		
+		dispatch('bookmark-click', { bookmark, modifierKey: isModifiedClick });
+		
+		if (!isModifiedClick && !isShiftClick) {
+			closeModal();
+		}
+	}
+	
+	function handleBookmarkContextMenu(bookmark: BookmarkItem, event: MouseEvent): void {
+		event.preventDefault();
+		event.stopPropagation();
+		
+		dispatch('bookmark-edit', { 
+			bookmark, 
+			position: { x: event.clientX, y: event.clientY } 
+		});
+	}
+	
+	function handleBookmarkDelete(bookmark: BookmarkItem): void {
+		if (confirm(`Delete bookmark "${bookmark.title}"?`)) {
+			try {
+				bookmarkStore.removeBookmark?.(bookmark.id);
+				dispatch('bookmark-deleted', { bookmark });
+			} catch (error) {
+				console.error('Failed to delete bookmark:', error);
+			}
+		}
+	}
+	
+	function closeModal(): void {
+		if (isClosing) return;
+		
+		isClosing = true;
+		clearSearch();
+		endDrag();
+		
+		dispatch('close');
+		
+		setTimeout(() => {
+			isClosing = false;
+		}, 300);
+	}
+	
+	function getFaviconUrl(bookmark: BookmarkItem): string {
+		if (bookmark.favicon) return bookmark.favicon;
+		if (bookmark.customIcon) return bookmark.customIcon;
+		
+		try {
+			const domain = new URL(bookmark.url).hostname;
+			return `https://www.google.com/s2/favicons?domain=${domain}&sz=32`;
+		} catch {
+			return '';
+		}
+	}
+	
+	function handleFaviconLoad(bookmark: BookmarkItem): void {
+		loadedFavicons.add(bookmark.id);
+	}
+	
+	function handleFaviconError(bookmark: BookmarkItem): void {
+		failedFavicons.add(bookmark.id);
+	}
+	
+	function getFallbackIcon(bookmark: BookmarkItem): string {
+		try {
+			const domain = new URL(bookmark.url).hostname;
+			return domain.charAt(0).toUpperCase();
+		} catch {
+			return '🔗';
+		}
+	}
+	
+	function setupIntersectionObserver(): void {
+		if (!browser || typeof IntersectionObserver === 'undefined') return;
+		
+		intersectionObserver = new IntersectionObserver((entries) => {
+			entries.forEach(entry => {
+				const bookmarkId = entry.target.getAttribute('data-bookmark-id');
+				if (bookmarkId) {
+					if (entry.isIntersecting) {
+						visibleBookmarks.add(bookmarkId);
+					} else {
+						visibleBookmarks.delete(bookmarkId);
+					}
+				}
+			});
+		}, {
+			threshold: 0.1,
+			rootMargin: '50px'
+		});
+		
+		setTimeout(() => {
+			const bookmarkElements = bookmarksContainer?.querySelectorAll('[data-bookmark-id]');
+			bookmarkElements?.forEach(el => intersectionObserver!.observe(el));
+		}, 100);
+	}
+	
+	function getContrastColor(backgroundColor: string): string {
+		try {
+			const hex = backgroundColor.replace('#', '');
+			const r = parseInt(hex.substr(0, 2), 16);
+			const g = parseInt(hex.substr(2, 2), 16);
+			const b = parseInt(hex.substr(4, 2), 16);
+			const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+			return luminance > 0.5 ? '#000000' : '#ffffff';
+		} catch {
+			return '#ffffff';
+		}
+	}
+	
+	function handleModalKeyDown(event: KeyboardEvent): void {
+		if (event.key === 'Tab') {
+			trapFocus(event);
+		}
+	}
+	
+	function trapFocus(event: KeyboardEvent): void {
+		const focusableElements = modalElement?.querySelectorAll(
+			'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+		);
+		
+		if (!focusableElements?.length) return;
+		
+		const firstElement = focusableElements[0] as HTMLElement;
+		const lastElement = focusableElements[focusableElements.length - 1] as HTMLElement;
+		
+		if (event.shiftKey) {
+			if (document.activeElement === firstElement) {
+				event.preventDefault();
+				lastElement.focus();
+			}
+		} else {
+			if (document.activeElement === lastElement) {
+				event.preventDefault();
+				firstElement.focus();
+			}
+		}
+	}
+	
+	function cleanup(): void {
+		if (typingTimeout) clearTimeout(typingTimeout);
+		if (hoverTimeout) clearTimeout(hoverTimeout);
+		if (intersectionObserver) {
+			intersectionObserver.disconnect();
+			intersectionObserver = null;
+		}
+		document.removeEventListener('keydown', handleGlobalKeyDown);
+		endDrag();
+	}
 </script>
 
-<div
-	class="bookmark-item"
-	class:layout-grid={layout === 'grid'}
-	class:layout-list={layout === 'list'}
-	class:layout-icon={layout === 'icon'}
-	class:size-small={size === 'small'}
-	class:size-medium={size === 'medium'}
-	class:size-large={size === 'large'}
-	class:dragging={isDragging}
-	class:hovered={isHovered}
-	bind:this={itemElement}
-	on:mouseenter={handleMouseEnter}
-	on:mouseleave={handleMouseLeave}
-	on:click={handleClick}
-	on:dblclick={handleDoubleClick}
-	on:contextmenu={handleContextMenu}
-	draggable="true"
-	on:dragstart={handleDragStart}
-	on:dragend={handleDragEnd}
-	on:dragover={handleDragOver}
-	on:drop={handleDrop}
-	role="button"
-	tabindex="0"
-	on:keydown={(e) => e.key === 'Enter' && handleClick(e)}
-	aria-label="Bookmark: {bookmark.name}"
-	style="
-		--text-color: {adaptedColors.text};
-		--text-secondary: {adaptedColors.textSecondary};
-		--bg-color: {adaptedColors.background};
-		--bg-hover: {adaptedColors.backgroundHover};
-		--border-color: {adaptedColors.border};
-		--shadow-color: {adaptedColors.shadow};
-		--icon-size: {config.icon}px;
-		--spacing: {config.spacing}px;
-		--font-size: {config.fontSize};
-		--padding: {config.padding};
-		--hover-scale: {$hoverScale};
-		--hover-lift: {$hoverLift}px;
-		--drag-scale: {$dragScale};
-		--drag-opacity: {$dragOpacity};
-	"
->
-	<div class="bookmark-content">
-		{#if showFavicon}
-			<div class="favicon-container">
-				{#if faviconError && !bookmark.customIcon}
-					<div class="favicon-fallback">
-						{bookmark.name?.charAt(0)?.toUpperCase() || '?'}
+{#if visible}
+	<div 
+		class="modal-overlay"
+		transition:fade={{ duration: 200 }}
+		on:click|self={closeModal}
+		on:keydown={handleModalKeyDown}
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="modal-title"
+	>
+		<div 
+			class="bookmark-modal"
+			bind:this={modalElement}
+			transition:scale={{ duration: 300, easing: elasticOut, start: 0.8 }}
+			style="
+				--modal-bg: {modalBackgroundColor};
+				--modal-border: {modalBorderColor};
+				--modal-text: {modalTextColor};
+				--modal-accent: {colorPalette.accent || colorPalette.current};
+			"
+			role="document"
+			tabindex="-1"
+		>
+			<div class="modal-header">
+				<div class="header-content">
+					<h2 id="modal-title" class="category-title">{category.name}</h2>
+					<div class="bookmark-stats" role="status" aria-live="polite">
+						{filteredBookmarks.length} 
+						{filteredBookmarks.length === 1 ? 'bookmark' : 'bookmarks'}
+						{#if searchQuery}
+							{#if filteredBookmarks.length !== category.bookmarks.length}
+								of {category.bookmarks.length}
+							{/if}
+						{/if}
+					</div>
+				</div>
+				
+				<div class="header-controls">
+					<div class="search-container" class:active={searchActive || searchQuery}>
+						<label for="bookmark-search" class="sr-only">Search bookmarks</label>
+						<div class="search-icon" aria-hidden="true">🔍</div>
+						<input
+							id="bookmark-search"
+							bind:this={searchInput}
+							bind:value={searchQuery}
+							on:input={handleSearchInput}
+							on:focus={() => searchActive = true}
+							on:blur={() => searchActive = !!searchQuery}
+							placeholder="Search bookmarks..."
+							class="search-input"
+							type="text"
+							aria-label="Search bookmarks"
+						/>
+						{#if searchQuery}
+							<button 
+								class="clear-search"
+								on:click={clearSearch}
+								aria-label="Clear search"
+								type="button"
+							>
+								×
+							</button>
+						{/if}
+					</div>
+					
+					<div class="view-controls">
+						<button 
+							class="toggle-labels"
+							class:active={showLabels}
+							on:click={() => showLabels = !showLabels}
+							aria-label="Toggle bookmark labels"
+							aria-pressed={showLabels}
+							title="Toggle Labels"
+							type="button"
+						>
+							<span aria-hidden="true">📝</span>
+						</button>
+					</div>
+					
+					<button 
+						class="close-button"
+						on:click={closeModal}
+						aria-label="Close bookmark modal"
+						type="button"
+					>
+						<span aria-hidden="true">×</span>
+					</button>
+				</div>
+			</div>
+			
+			<div class="modal-content">
+				{#if filteredBookmarks.length === 0}
+					<div class="empty-bookmarks" role="status">
+						{#if searchQuery}
+							<div class="empty-icon" aria-hidden="true">🔍</div>
+							<h3>No bookmarks found</h3>
+							<p>Try adjusting your search terms</p>
+							<button 
+								class="clear-search-btn" 
+								on:click={clearSearch}
+								type="button"
+							>
+								Clear Search
+							</button>
+						{:else}
+							<div class="empty-icon" aria-hidden="true">📌</div>
+							<h3>No bookmarks yet</h3>
+							<p>Add some bookmarks to get started</p>
+						{/if}
 					</div>
 				{:else}
-					<img
-						src={faviconUrl}
-						alt=""
-						class="favicon"
-						on:error={() => faviconError = true}
-						loading="lazy"
-					/>
-				{/if}
-			</div>
-		{/if}
-		
-		{#if showTitle && (layout === 'grid' || layout === 'list')}
-			<div class="bookmark-title">
-				{bookmark.name}
-			</div>
-		{/if}
-		
-		{#if layout === 'list'}
-			<div class="bookmark-url">
-				{new URL(bookmark.url).hostname}
-			</div>
-		{/if}
-	</div>
-</div>
-
-<!-- Context Menu -->
-{#if isContextMenuOpen}
-	<div
-		class="context-menu"
-		bind:this={contextMenu}
-		style="left: {contextMenuPosition.x}px; top: {contextMenuPosition.y}px"
-		on:click|stopPropagation
-	>
-		<button class="context-item" on:click={openInNewTab}>
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-				<polyline points="15,3 21,3 21,9"/>
-				<line x1="10" y1="14" x2="21" y2="3"/>
-			</svg>
-			Open in New Tab
-		</button>
-		
-		<button class="context-item" on:click={copyBookmarkUrl}>
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-				<path d="m4 16c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2h8c1.1 0 2 .9 2 2"/>
-			</svg>
-			Copy URL
-		</button>
-		
-		<div class="context-divider"></div>
-		
-		<button class="context-item edit" on:click={openEditDialog}>
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-				<path d="m18.5 2.5 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-			</svg>
-			Edit Bookmark
-		</button>
-		
-		<button class="context-item duplicate" on:click={() => { dispatch('duplicate', bookmark); closeContextMenu(); }}>
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-				<path d="m4 16c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2h8c1.1 0 2 .9 2 2"/>
-			</svg>
-			Duplicate
-		</button>
-		
-		<div class="context-divider"></div>
-		
-		<button class="context-item delete" on:click={deleteBookmark}>
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<path d="m3 6 3 0m0 0a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2m-12 0v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6"/>
-				<line x1="10" y1="11" x2="10" y2="17"/>
-				<line x1="14" y1="11" x2="14" y2="17"/>
-			</svg>
-			Delete
-		</button>
-	</div>
-{/if}
-
-<!-- Edit Dialog -->
-{#if showEditDialog}
-	<div
-		class="edit-modal"
-		style="opacity: {$editDialogOpacity}"
-		on:click={closeEditDialog}
-	>
-		<div
-			class="edit-dialog"
-			bind:this={editDialog}
-			style="transform: scale({$editDialogScale})"
-			on:click|stopPropagation
-		>
-			<div class="dialog-header">
-				<h3>Edit Bookmark</h3>
-				<button class="close-button" on:click={closeEditDialog}>
-					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<line x1="18" y1="6" x2="6" y2="18"/>
-						<line x1="6" y1="6" x2="18" y2="18"/>
-					</svg>
-				</button>
-			</div>
-			
-			<div class="dialog-content">
-				<div class="form-group">
-					<label for="bookmark-name">Name</label>
-					<input
-						id="bookmark-name"
-						type="text"
-						bind:value={editForm.name}
-						placeholder="Bookmark name"
-						class="form-input"
-					/>
-				</div>
-				
-				<div class="form-group">
-					<label for="bookmark-url">URL</label>
-					<input
-						id="bookmark-url"
-						type="url"
-						bind:value={editForm.url}
-						placeholder="https://example.com"
-						class="form-input"
-					/>
-				</div>
-				
-				<div class="form-group">
-					<label class="checkbox-label">
-						<input type="checkbox" bind:checked={editForm.useCustomIcon} />
-						<span>Use custom icon</span>
-					</label>
-				</div>
-				
-				{#if editForm.useCustomIcon}
-					<div class="custom-icon-section">
-						<div class="icon-preview">
-							{#if editForm.customIcon}
-								<img src={editForm.customIcon} alt="Custom icon" class="preview-image" />
-							{:else}
-								<div class="preview-placeholder">No icon</div>
-							{/if}
-						</div>
-						
-						<div class="icon-inputs">
-							<div class="form-group">
-								<label for="icon-url">Icon URL</label>
-								<input
-									id="icon-url"
-									type="url"
-									bind:value={editForm.customIcon}
-									placeholder="https://example.com/icon.png"
-									class="form-input"
-								/>
+					<div 
+						class="bookmarks-grid"
+						bind:this={bookmarksContainer}
+						class:dragging={isDragging}
+						role="grid"
+						aria-label="Bookmarks"
+					>
+						{#each filteredBookmarks as bookmark, index (bookmark.id)}
+							<div 
+								class="bookmark-item"
+								class:dragging={draggedBookmark?.id === bookmark.id}
+								class:drop-target={dropTarget?.id === bookmark.id}
+								data-bookmark-id={bookmark.id}
+								draggable="true"
+								on:dragstart={(e) => handleDragStart(bookmark, e)}
+								on:dragover={(e) => handleDragOver(bookmark, e)}
+								on:drop={(e) => handleDrop(bookmark, e)}
+								on:dragend={handleDragEnd}
+								on:click={(e) => handleBookmarkClick(bookmark, e)}
+								on:keydown={(e) => handleBookmarkKeyDown(bookmark, e)}
+								on:contextmenu={(e) => handleBookmarkContextMenu(bookmark, e)}
+								transition:fly={{ 
+									y: 20, 
+									duration: 200, 
+									delay: Math.min(index * 50, 500) 
+								}}
+								role="gridcell"
+								tabindex="0"
+								aria-label="Bookmark: {bookmark.title}"
+								aria-describedby="bookmark-desc-{bookmark.id}"
+								aria-grabbed="false"
+							>
+								<div class="bookmark-favicon">
+									{#if !failedFavicons.has(bookmark.id)}
+										<img
+											src={getFaviconUrl(bookmark)}
+											alt=""
+											loading="lazy"
+											on:load={() => handleFaviconLoad(bookmark)}
+											on:error={() => handleFaviconError(bookmark)}
+											class="favicon-image"
+											aria-hidden="true"
+										/>
+									{:else}
+										<div class="favicon-fallback" aria-hidden="true">
+											{getFallbackIcon(bookmark)}
+										</div>
+									{/if}
+								</div>
+								
+								{#if showLabels}
+									<div 
+										class="bookmark-label" 
+										transition:fade={{ duration: 150 }}
+										id="bookmark-desc-{bookmark.id}"
+									>
+										<span class="bookmark-title">{bookmark.title}</span>
+										{#if bookmark.description}
+											<span class="bookmark-description">{bookmark.description}</span>
+										{/if}
+									</div>
+								{/if}
+								
+								<div 
+									class="drag-handle" 
+									title="Drag to reorder or create folder"
+									aria-hidden="true"
+								>
+									⋮⋮
+								</div>
 							</div>
-							
-							<div class="upload-section">
-								<label class="upload-label">
-									Or upload file
-									<input
-										type="file"
-										accept="image/*"
-										bind:this={fileInput}
-										on:change={handleCustomIconUpload}
-										class="file-input"
-									/>
-								</label>
-							</div>
-						</div>
+						{/each}
 					</div>
 				{/if}
 			</div>
 			
-			<div class="dialog-actions">
-				<button class="cancel-button" on:click={closeEditDialog}>Cancel</button>
-				<button
-					class="save-button"
-					class:loading={isLoading}
-					on:click={saveChanges}
-					disabled={isLoading || !editForm.name.trim() || !editForm.url.trim()}
-				>
-					{#if isLoading}
-						<span class="spinner"></span>
-					{/if}
-					Save Changes
-				</button>
+			<div class="modal-footer">
+				<div class="footer-info">
+					<span class="hint" role="note">
+						<span aria-hidden="true">💡</span> 
+						Drag bookmarks to reorder or create folders
+					</span>
+				</div>
+				<div class="footer-actions">
+					<button 
+						class="action-btn secondary" 
+						on:click={clearSearch}
+						type="button"
+						disabled={!searchQuery}
+					>
+						Clear Search
+					</button>
+					<button 
+						class="action-btn primary" 
+						on:click={closeModal}
+						type="button"
+					>
+						Done
+					</button>
+				</div>
 			</div>
 		</div>
 	</div>
 {/if}
 
 <style>
-	.bookmark-item {
-		position: relative;
-		cursor: pointer;
-		user-select: none;
-		border-radius: 12px;
-		border: 1px solid var(--border-color);
-		background: var(--bg-color);
-		backdrop-filter: blur(10px);
-		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-		transform: 
-			scale(var(--hover-scale, 1))
-			translateY(var(--hover-lift, 0px))
-			scale(var(--drag-scale, 1));
-		opacity: var(--drag-opacity, 1);
-		overflow: hidden;
-	}
-	
-	.bookmark-item:hover {
-		background: var(--bg-hover);
-		border-color: var(--text-secondary);
-		box-shadow: 0 8px 24px var(--shadow-color);
-	}
-	
-	.bookmark-item.dragging {
-		z-index: 1000;
-		box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
-		transform: rotate(2deg);
-	}
-	
-	/* Layout: Grid */
-	.bookmark-item.layout-grid {
-		padding: var(--padding);
-		min-height: 80px;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		text-align: center;
-	}
-	
-	.bookmark-item.layout-grid .bookmark-content {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: var(--spacing);
-		width: 100%;
-	}
-	
-	/* Layout: List */
-	.bookmark-item.layout-list {
-		padding: calc(var(--padding) / 2) var(--padding);
-		display: flex;
-		align-items: center;
-	}
-	
-	.bookmark-item.layout-list .bookmark-content {
-		display: flex;
-		align-items: center;
-		gap: var(--spacing);
-		width: 100%;
-		min-height: calc(var(--icon-size) + 4px);
-	}
-	
-	.bookmark-item.layout-list .bookmark-title {
-		flex: 1;
-		text-align: left;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	
-	.bookmark-item.layout-list .bookmark-url {
-		color: var(--text-secondary);
-		font-size: calc(var(--font-size) - 1px);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 200px;
-	}
-	
-	/* Layout: Icon */
-	.bookmark-item.layout-icon {
-		padding: calc(var(--padding) / 2);
-		width: calc(var(--icon-size) + var(--padding));
-		height: calc(var(--icon-size) + var(--padding));
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-	
-	.bookmark-item.layout-icon .bookmark-content {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-	
-	.bookmark-item.layout-icon .bookmark-title {
-		display: none;
-	}
-	
-	/* Favicon */
-	.favicon-container {
-		position: relative;
-		width: var(--icon-size);
-		height: var(--icon-size);
-		flex-shrink: 0;
-	}
-	
-	.favicon {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		border-radius: 6px;
-		background: var(--bg-color);
-		border: 1px solid var(--border-color);
-	}
-	
-	.favicon-fallback {
-		width: 100%;
-		height: 100%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: linear-gradient(135deg, var(--text-color), var(--text-secondary));
-		color: white;
-		font-weight: 600;
-		font-size: calc(var(--icon-size) * 0.4);
-		border-radius: 6px;
-		text-transform: uppercase;
-	}
-	
-	/* Title */
-	.bookmark-title {
-		color: var(--text-color);
-		font-size: var(--font-size);
-		font-weight: 500;
-		line-height: 1.3;
-		word-break: break-word;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-	
-	.bookmark-item.layout-grid .bookmark-title {
-		max-width: 100%;
-		text-align: center;
-	}
-	
-	/* Size variations */
-	.bookmark-item.size-small .bookmark-title {
-		-webkit-line-clamp: 1;
-	}
-	
-	.bookmark-item.size-large .bookmark-title {
-		-webkit-line-clamp: 3;
-	}
-	
-	/* Context Menu */
-	.context-menu {
-		position: fixed;
-		background: rgba(255, 255, 255, 0.1);
-		backdrop-filter: blur(20px);
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		border-radius: 12px;
-		padding: 8px 0;
-		min-width: 180px;
-		z-index: 2000;
-		box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
-		animation: contextMenuAppear 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-	}
-	
-	@keyframes contextMenuAppear {
-		from {
-			opacity: 0;
-			transform: scale(0.95) translateY(-10px);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1) translateY(0);
-		}
-	}
-	
-	.context-item {
-		width: 100%;
-		padding: 8px 16px;
-		background: none;
-		border: none;
-		color: rgba(255, 255, 255, 0.8);
-		font-size: 14px;
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		transition: all 0.2s ease;
-		text-align: left;
-	}
-	
-	.context-item:hover {
-		background: rgba(255, 255, 255, 0.1);
-		color: white;
-	}
-	
-	.context-item.edit:hover {
-		background: rgba(33, 150, 243, 0.2);
-		color: #2196f3;
-	}
-	
-	.context-item.duplicate:hover {
-		background: rgba(156, 39, 176, 0.2);
-		color: #9c27b0;
-	}
-	
-	.context-item.delete:hover {
-		background: rgba(244, 67, 54, 0.2);
-		color: #f44336;
-	}
-	
-	.context-divider {
+	.sr-only {
+		position: absolute;
+		width: 1px;
 		height: 1px;
-		background: rgba(255, 255, 255, 0.1);
-		margin: 4px 0;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
 	}
-	
-	/* Edit Dialog */
-	.edit-modal {
+
+	.modal-overlay {
 		position: fixed;
 		top: 0;
 		left: 0;
 		width: 100vw;
 		height: 100vh;
-		background: rgba(0, 0, 0, 0.8);
+		background: rgba(0, 0, 0, 0.7);
+		backdrop-filter: blur(8px);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		z-index: 3000;
-		backdrop-filter: blur(4px);
+		z-index: 1000;
+		padding: 20px;
 	}
 	
-	.edit-dialog {
+	.bookmark-modal {
 		width: 90vw;
-		max-width: 500px;
-		background: rgba(255, 255, 255, 0.1);
-		backdrop-filter: blur(20px);
+		max-width: 800px;
+		height: 80vh;
+		max-height: 700px;
+		background: var(--modal-bg);
+		border: 2px solid var(--modal-border);
 		border-radius: 20px;
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		box-shadow: 0 32px 64px rgba(0, 0, 0, 0.4);
+		backdrop-filter: blur(20px);
+		box-shadow: 
+			0 25px 50px rgba(0, 0, 0, 0.5),
+			0 0 0 1px rgba(255, 255, 255, 0.1),
+			inset 0 1px 0 rgba(255, 255, 255, 0.2);
+		display: flex;
+		flex-direction: column;
 		overflow: hidden;
+		position: relative;
+		outline: none;
 	}
 	
-	.dialog-header {
+	.bookmark-modal::before {
+		content: '';
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		background: linear-gradient(
+			135deg,
+			rgba(255, 255, 255, 0.1) 0%,
+			transparent 50%,
+			rgba(0, 0, 0, 0.1) 100%
+		);
+		pointer-events: none;
+		border-radius: inherit;
+	}
+	
+	.modal-header {
+		padding: 24px 32px 16px;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+		background: rgba(255, 255, 255, 0.05);
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 20px 24px;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-		background: rgba(255, 255, 255, 0.05);
+		gap: 24px;
+		position: relative;
+		z-index: 2;
 	}
 	
-	.dialog-header h3 {
+	.header-content {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	
+	.category-title {
 		margin: 0;
+		font-size: 24px;
+		font-weight: 700;
+		color: var(--modal-text);
+		text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+	}
+	
+	.bookmark-stats {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.6);
+		font-weight: 500;
+	}
+	
+	.header-controls {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+	}
+	
+	.search-container {
+		position: relative;
+		display: flex;
+		align-items: center;
+		background: rgba(255, 255, 255, 0.1);
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		border-radius: 20px;
+		padding: 8px 16px;
+		transition: all 0.3s ease;
+		min-width: 200px;
+	}
+	
+	.search-container.active {
+		background: rgba(255, 255, 255, 0.15);
+		border-color: var(--modal-accent);
+		box-shadow: 0 0 0 2px rgba(var(--modal-accent), 0.2);
+	}
+	
+	.search-icon {
+		margin-right: 8px;
+		font-size: 14px;
+		opacity: 0.7;
+	}
+	
+	.search-input {
+		background: none;
+		border: none;
+		outline: none;
+		color: var(--modal-text);
+		font-size: 14px;
+		width: 100%;
+		min-width: 0;
+	}
+	
+	.search-input::placeholder {
+		color: rgba(255, 255, 255, 0.5);
+	}
+	
+	.clear-search {
+		background: none;
+		border: none;
+		color: rgba(255, 255, 255, 0.6);
+		cursor: pointer;
 		font-size: 18px;
-		font-weight: 600;
+		line-height: 1;
+		margin-left: 8px;
+		padding: 2px 4px;
+		border-radius: 4px;
+		transition: all 0.3s ease;
+	}
+	
+	.clear-search:hover {
+		background: rgba(255, 255, 255, 0.1);
 		color: white;
 	}
 	
-	.close-button {
-		background: none;
-		border: none;
+	.clear-search:focus {
+		outline: 2px solid var(--modal-accent);
+		outline-offset: 2px;
+	}
+	
+	.view-controls {
+		display: flex;
+		gap: 8px;
+	}
+	
+	.toggle-labels {
+		background: rgba(255, 255, 255, 0.1);
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		border-radius: 8px;
 		color: rgba(255, 255, 255, 0.7);
 		cursor: pointer;
-		padding: 4px;
-		border-radius: 6px;
-		transition: all 0.2s ease;
+		font-size: 16px;
+		padding: 8px;
+		transition: all 0.3s ease;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 	}
 	
-	.close-button:hover {
+	.toggle-labels:hover {
+		background: rgba(255, 255, 255, 0.15);
 		color: white;
+	}
+	
+	.toggle-labels:focus {
+		outline: 2px solid var(--modal-accent);
+		outline-offset: 2px;
+	}
+	
+	.toggle-labels.active {
+		background: var(--modal-accent);
+		color: white;
+		border-color: var(--modal-accent);
+	}
+	
+	.close-button {
 		background: rgba(255, 255, 255, 0.1);
-	}
-	
-	.dialog-content {
-		padding: 24px;
-		max-height: 400px;
-		overflow-y: auto;
-	}
-	
-	.form-group {
-		margin-bottom: 16px;
-	}
-	
-	.form-group label {
-		display: block;
-		margin-bottom: 6px;
-		font-size: 14px;
-		font-weight: 500;
-		color: rgba(255, 255, 255, 0.9);
-	}
-	
-	.checkbox-label {
-		display: flex !important;
-		align-items: center;
-		gap: 8px;
-		cursor: pointer;
-	}
-	
-	.checkbox-label input {
-		width: 16px;
-		height: 16px;
-		accent-color: #4caf50;
-	}
-	
-	.form-input {
-		width: 100%;
-		padding: 12px 16px;
 		border: 1px solid rgba(255, 255, 255, 0.2);
 		border-radius: 8px;
-		background: rgba(255, 255, 255, 0.1);
+		color: rgba(255, 255, 255, 0.7);
+		cursor: pointer;
+		font-size: 20px;
+		line-height: 1;
+		padding: 8px;
+		transition: all 0.3s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 40px;
+		height: 40px;
+	}
+	
+	.close-button:hover {
+		background: rgba(255, 255, 255, 0.15);
 		color: white;
+	}
+	
+	.close-button:focus {
+		outline: 2px solid var(--modal-accent);
+		outline-offset: 2px;
+	}
+	
+	.modal-content {
+		flex: 1;
+		overflow: hidden;
+		position: relative;
+		z-index: 1;
+	}
+	
+	.empty-bookmarks {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		height: 100%;
+		color: rgba(255, 255, 255, 0.6);
+		text-align: center;
+		padding: 40px;
+	}
+	
+	.empty-icon {
+		font-size: 48px;
+		margin-bottom: 16px;
+		opacity: 0.7;
+	}
+	
+	.empty-bookmarks h3 {
+		margin: 0 0 8px 0;
+		font-size: 18px;
+		color: rgba(255, 255, 255, 0.8);
+	}
+	
+	.empty-bookmarks p {
+		margin: 0 0 20px 0;
 		font-size: 14px;
+	}
+	
+	.clear-search-btn {
+		background: var(--modal-accent);
+		border: none;
+		border-radius: 8px;
+		color: white;
+		cursor: pointer;
+		font-size: 14px;
+		padding: 8px 16px;
 		transition: all 0.3s ease;
 	}
 	
-	.form-input:focus {
-		outline: none;
-		border-color: rgba(255, 255, 255, 0.4);
-		box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1);
+	.clear-search-btn:hover {
+		opacity: 0.9;
+		transform: translateY(-1px);
 	}
 	
-	.form-input::placeholder {
-		color: rgba(255, 255, 255, 0.5);
+	.clear-search-btn:focus {
+		outline: 2px solid rgba(255, 255, 255, 0.8);
+		outline-offset: 2px;
 	}
 	
-	.custom-icon-section {
-		display: flex;
+	.bookmarks-grid {
+		padding: 24px;
+		height: 100%;
+		overflow-y: auto;
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
 		gap: 16px;
-		align-items: flex-start;
-		padding: 16px;
-		background: rgba(255, 255, 255, 0.05);
-		border-radius: 8px;
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		align-content: start;
 	}
 	
-	.icon-preview {
-		flex-shrink: 0;
+	.bookmarks-grid.dragging {
+		user-select: none;
+	}
+	
+	.bookmark-item {
+		background: rgba(255, 255, 255, 0.08);
+		border: 2px solid rgba(255, 255, 255, 0.1);
+		border-radius: 16px;
+		cursor: pointer;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding: 16px 12px;
+		position: relative;
+		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+		min-height: 120px;
+		overflow: hidden;
+	}
+	
+	.bookmark-item:hover {
+		background: rgba(255, 255, 255, 0.12);
+		border-color: rgba(255, 255, 255, 0.3);
+		transform: translateY(-2px);
+		box-shadow: 
+			0 8px 25px rgba(0, 0, 0, 0.3),
+			0 0 0 1px var(--modal-accent);
+	}
+	
+	.bookmark-item:focus {
+		outline: 2px solid var(--modal-accent);
+		outline-offset: 2px;
+		background: rgba(255, 255, 255, 0.12);
+	}
+	
+	.bookmark-item.dragging {
+		opacity: 0.7;
+		transform: rotate(5deg) scale(1.05);
+		z-index: 1000;
+		box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+	}
+	
+	.bookmark-item.drop-target {
+		background: rgba(var(--modal-accent), 0.2);
+		border-color: var(--modal-accent);
+		animation: pulse 1s infinite;
+	}
+	
+	.bookmark-item.folder-drop-target {
+		background: rgba(255, 193, 7, 0.2);
+		border-color: #ffc107;
+		animation: folderPulse 0.5s ease-in-out;
+	}
+	
+	.bookmark-favicon {
 		width: 48px;
 		height: 48px;
-		border: 1px solid rgba(255, 255, 255, 0.2);
 		border-radius: 8px;
 		overflow: hidden;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		background: rgba(255, 255, 255, 0.1);
+		margin-bottom: 8px;
+		transition: transform 0.3s ease;
 	}
 	
-	.preview-image {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
+	.bookmark-item:hover .bookmark-favicon {
+		transform: scale(1.1);
 	}
 	
-	.preview-placeholder {
-		font-size: 10px;
-		color: rgba(255, 255, 255, 0.5);
+	.favicon-image {
+		width: 32px;
+		height: 32px;
+		object-fit: contain;
+		filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+	}
+	
+	.favicon-fallback {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: linear-gradient(135deg, var(--modal-accent), #667eea);
+		color: white;
+		font-weight: bold;
+		font-size: 16px;
+		border-radius: 4px;
+	}
+	
+	.bookmark-label {
 		text-align: center;
+		width: 100%;
 	}
 	
-	.icon-inputs {
+	.bookmark-title {
+		display: block;
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--modal-text);
+		line-height: 1.2;
+		margin-bottom: 2px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+	}
+	
+	.bookmark-description {
+		display: block;
+		font-size: 9px;
+		color: rgba(255, 255, 255, 0.6);
+		line-height: 1.1;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	
+	.drag-handle {
+		position: absolute;
+		top: 4px;
+		right: 4px;
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.4);
+		opacity: 0;
+		transition: opacity 0.3s ease;
+		cursor: grab;
+		transform: rotate(90deg);
+		pointer-events: none;
+	}
+	
+	.bookmark-item:hover .drag-handle {
+		opacity: 1;
+	}
+	
+	.drag-handle:active {
+		cursor: grabbing;
+	}
+	
+	.modal-footer {
+		padding: 16px 24px;
+		border-top: 1px solid rgba(255, 255, 255, 0.1);
+		background: rgba(255, 255, 255, 0.05);
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		position: relative;
+		z-index: 2;
+	}
+	
+	.footer-info {
 		flex: 1;
 	}
 	
-	.upload-section {
-		margin-top: 12px;
+	.hint {
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.5);
+		font-style: italic;
+		display: flex;
+		align-items: center;
+		gap: 6px;
 	}
 	
-	.upload-label {
-		display: inline-block;
-		padding: 8px 16px;
-		background: rgba(33, 150, 243, 0.2);
-		color: #2196f3;
-		border: 1px solid rgba(33, 150, 243, 0.3);
-		border-radius: 8px;
-		cursor: pointer;
-		font-size: 14px;
-		transition: all 0.3s ease;
-	}
-	
-	.upload-label:hover {
-		background: rgba(33, 150, 243, 0.3);
-	}
-	
-	.file-input {
-		display: none;
-	}
-	
-	.dialog-actions {
+	.footer-actions {
 		display: flex;
 		gap: 12px;
-		justify-content: flex-end;
-		padding: 20px 24px;
-		border-top: 1px solid rgba(255, 255, 255, 0.1);
-		background: rgba(255, 255, 255, 0.05);
 	}
 	
-	.cancel-button,
-	.save-button {
-		padding: 10px 20px;
-		border: none;
+	.action-btn {
+		padding: 8px 16px;
 		border-radius: 8px;
 		font-size: 14px;
 		font-weight: 500;
 		cursor: pointer;
 		transition: all 0.3s ease;
-		display: flex;
-		align-items: center;
-		gap: 8px;
+		border: 1px solid transparent;
 	}
 	
-	.cancel-button {
-		background: rgba(255, 255, 255, 0.1);
-		color: rgba(255, 255, 255, 0.8);
-		border: 1px solid rgba(255, 255, 255, 0.2);
+	.action-btn:focus {
+		outline: 2px solid var(--modal-accent);
+		outline-offset: 2px;
 	}
 	
-	.cancel-button:hover {
-		background: rgba(255, 255, 255, 0.2);
-		color: white;
-	}
-	
-	.save-button {
-		background: #4caf50;
-		color: white;
-	}
-	
-	.save-button:hover:not(:disabled) {
-		background: #45a049;
-	}
-	
-	.save-button:disabled {
-		opacity: 0.6;
+	.action-btn:disabled {
+		opacity: 0.5;
 		cursor: not-allowed;
 	}
 	
-	.save-button.loading {
-		pointer-events: none;
+	.action-btn.secondary {
+		background: rgba(255, 255, 255, 0.1);
+		border-color: rgba(255, 255, 255, 0.2);
+		color: rgba(255, 255, 255, 0.8);
 	}
 	
-	.spinner {
-		width: 16px;
-		height: 16px;
-		border: 2px solid transparent;
-		border-top: 2px solid currentColor;
-		border-radius: 50%;
-		animation: spin 1s linear infinite;
+	.action-btn.secondary:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.15);
+		color: white;
 	}
 	
-	@keyframes spin {
-		to { transform: rotate(360deg); }
+	.action-btn.primary {
+		background: var(--modal-accent);
+		color: white;
 	}
 	
+	.action-btn.primary:hover {
+		opacity: 0.9;
+		transform: translateY(-1px);
+	}
+	
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.7; }
+	}
+	
+	@keyframes folderPulse {
+		0% { transform: scale(1); }
+		50% { transform: scale(1.05); }
+		100% { transform: scale(1); }
+	}
+
 	@media (max-width: 768px) {
-		.edit-dialog {
+		.bookmark-modal {
 			width: 95vw;
-			max-height: 85vh;
+			height: 90vh;
+			margin: 0;
 		}
 		
-		.dialog-content {
-			max-height: none;
-		}
-		
-		.custom-icon-section {
+		.modal-header {
+			padding: 16px 20px 12px;
 			flex-direction: column;
+			gap: 16px;
 		}
 		
-		.bookmark-item.layout-list .bookmark-url {
-			display: none;
+		.header-controls {
+			width: 100%;
+			justify-content: space-between;
 		}
 		
-		.context-menu {
-			min-width: 160px;
+		.search-container {
+			flex: 1;
+			min-width: 0;
 		}
-	}
-	
-	@media (prefers-reduced-motion: reduce) {
+		
+		.bookmarks-grid {
+			padding: 16px;
+			grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+			gap: 12px;
+		}
+		
 		.bookmark-item {
-			transition: none !important;
-			animation: none !important;
+			min-height: 100px;
+			padding: 12px 8px;
 		}
 		
-		.bookmark-item:hover {
-			transform: scale(1.02);
+		.modal-footer {
+			padding: 12px 16px;
+			flex-direction: column;
+			gap: 12px;
+		}
+		
+		.footer-actions {
+			width: 100%;
+			justify-content: space-between;
+		}
+		
+		.action-btn {
+			flex: 1;
 		}
 	}
 </style>
