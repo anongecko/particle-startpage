@@ -7,7 +7,7 @@
 	
 	import type { BookmarkCategory } from '$stores/bookmarks';
 	import { bookmarkStore } from '$stores/bookmarks';
-	import { settings } from '$stores/settings';
+	import { settingsStore } from '$stores/settings';
 	import { colorStore } from '$stores/color';
 	import { Object3DRegistry } from '$lib/objects3d';
 	
@@ -51,7 +51,7 @@
 	const dispatch = createEventDispatcher();
 	
 	// Reactive computations
-	$: currentSettings = get(settings);
+	$: currentSettings = get(settingsStore);
 	$: colorPalette = get(colorStore);
 	$: modalBackgroundColor = colorPalette.darkest || '#1a1a1a';
 	$: menuBackgroundColor = lightenColor(modalBackgroundColor, 0.15);
@@ -144,6 +144,12 @@
 				closeMenu();
 			}
 		};
+
+    function handleMenuKeydown(event: KeyboardEvent) {
+	if (event.key === 'Escape') {
+		visible = false;
+	}
+}
 		
 		// Touch handlers for mobile
 		const handleTouchStart = (event: TouchEvent) => {
@@ -384,12 +390,21 @@
 			clearTimeout(longPressTimer);
 		}
 	}
+  function handleMenuKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      visible = false;
+    }
+  }
+
 </script>
 
-{#if visible}
+{#if visible
+
+}
 	<div 
 		class="context-menu"
 		bind:this={menuElement}
+    onkeydown={handleMenuKeydown}
 		style="
 			left: {adjustedPosition.x}px;
 			top: {adjustedPosition.y}px;
@@ -410,7 +425,7 @@
 		tabindex="-1"
 		role="menu"
 		aria-label="Folder context menu"
-		on:click|stopPropagation
+		onclick={(e) => e.stopPropagation()}
 	>
 		<!-- Recent Objects Section -->
 		{#if recentObjects.length > 0}
@@ -424,8 +439,8 @@
 						<button
 							class="recent-object"
 							class:keyboard-focus={selectedIndex === index}
-							on:click={() => handleRecentObjectSelect(recentObject)}
-							on:mouseenter={() => handleRecentObjectHover(index)}
+							onclick={() => handleRecentObjectSelect(recentObject)}
+              onmouseenter={() => handleRecentObjectHover(index)}
 							title="{recentObject.name} ({recentObject.category})"
 							aria-label="Switch to {recentObject.name}"
 						>
@@ -449,8 +464,8 @@
 				<button
 					class="menu-item"
 					class:keyboard-focus={selectedIndex === recentObjects.length + index}
-					on:click={() => handleMenuItemClick(menuItem)}
-					on:mouseenter={() => handleMenuItemHover(index)}
+					onclick={() => handleMenuItemClick(menuItem)}
+					onmouseenter={() => handleMenuItemHover(index)}
 					role="menuitem"
 					aria-label={menuItem.description}
 				>

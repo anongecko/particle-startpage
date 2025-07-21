@@ -1,5 +1,6 @@
 import { browser } from '$app/environment';
 import chroma from 'chroma-js';
+import { colorStore } from '../stores/color';
 import type { ColorPalette } from '$stores/color';
 
 export interface ColorConfig {
@@ -21,6 +22,20 @@ export interface ColorValidationResult {
 	format: 'hex' | 'rgb' | 'hsl' | 'lab' | 'oklch' | 'unknown';
 	normalized: string;
 	error?: string;
+}
+
+// Add function export
+export async function extractDominantColor(
+	imagePath: string,
+	options?: Partial<{
+		quality: 'fast' | 'balanced' | 'high';
+		maxSize: number;
+		sampleRate: number;
+		minSaturation: number;
+		useOffscreen: boolean;
+	}>
+): Promise<string> {
+	return await colorStore.extractDominantColor(imagePath, options);
 }
 
 const CONFIG: ColorConfig = {
@@ -527,5 +542,6 @@ export const colorUtils = {
 	generateGradient,
 	generateRadialGradient,
 	pickColorFromScreen,
-	warmUpCache
+	warmUpCache,
+	extractDominantColor
 };

@@ -1,8 +1,6 @@
 <script lang="ts">
-	import { onMount, onDestroy, createEventDispatcher, getContext, tick } from 'svelte';
+	import { onMount, onDestroy, createEventDispatcher, getContext } from 'svelte';
 	import { browser } from '$app/environment';
-	import * as THREE from 'three';
-	
 	import type { BookmarkCategory } from '$stores/bookmarks';
 	import type { Object3DConfig, Object3DInstance } from '$lib/objects3d';
 	import { 
@@ -12,10 +10,10 @@
 		WebGLContextManager
 	} from '$lib/objects3d';
 	import { PerformanceMonitor } from '$lib/performance';
-	import { objects3DSettings, colorSettings } from '$stores/settings';
+	import { objects3DSettings } from '$stores/settings';
 	import { colorStore } from '$stores/color';
-	import { ThreeRenderer } from '$lib/three-renderer';
-	
+	import type { ThreeRenderer } from '$lib/three-renderer';
+
 	interface Props {
 		bookmarkCategory?: BookmarkCategory | null;
 		objectId?: string;
@@ -33,7 +31,7 @@
 		fallbackTo2D?: boolean;
 		interactive?: boolean;
 	}
-	
+
 	let {
 		bookmarkCategory = null,
 		objectId = '',
@@ -51,59 +49,54 @@
 		fallbackTo2D = true,
 		interactive = true
 	}: Props = $props();
-	
+
 	const dispatch = createEventDispatcher();
 	
-	let canvasElement: HTMLCanvasElement = $state();
+	// Core component state
 	let containerElement: HTMLElement = $state();
-	let sharedRenderer: ThreeRenderer | null = $state();
-	let dedicatedRenderer: THREE.WebGLRenderer | null = $state();
-	let scene: THREE.Scene | null = $state();
-	let camera: THREE.PerspectiveCamera | null = $state();
-	let resizeObserver: ResizeObserver | null = $state();
 	let objectInstance: Object3DInstance | null = $state();
 	let objectConfig: Object3DConfig | null = $state();
-	let performanceMonitor: PerformanceMonitor = $state();
 	let isInitialized = $state(false);
 	let hasError = $state(false);
 	let errorMessage = $state('');
 	let isHovered = $state(false);
-	let lastFrameTime = $state(0);
-	let animationFrameId = $state(0);
-	let webGLSupported = $state(true);
 	
-	let componentMode = $derived(staticPreview ? 'static' : 
-								previewMode ? 'preview' : 
-								bookmarkCategory ? 'bookmark' : 'preview');
+	// Context and renderer
+	const sharedRenderer: ThreeRenderer | null = getContext('threeRenderer');
+	const webGLSupported: boolean = getContext('webGLSupported') ?? true;
+	const isMobile: boolean = getContext('isMobile') ?? false;
+	const simplified3DMode: boolean = getContext('simplified3DMode') ?? false;
+
+	// Performance monitoring
+	let performanceMonitor: PerformanceMonitor;
+
+	// Derived state
+	const componentMode = $derived(
+		staticPreview ? 'static' : 
+		previewMode ? 'preview' : 
+		bookmarkCategory ? 'bookmark' : 'preview'
+	);
 	
-	let currentSettings = $derived($objects3DSettings);
-	let colorPalette = $derived($colorStore);
-	let currentDominantColor = $derived(dominantColor || colorPalette?.current || '#4a90e2');
-	let effectiveObjectId = $derived(objectId || config?.id || bookmarkCategory?.objectId || '');
-	let effectiveScale = $derived(scale * (currentSettings?.globalScale || 1.0));
-	let shouldAnimate = $derived(enableAnimation && currentSettings?.enableAnimations && !staticPreview);
-	let effectiveAnimationSpeed = $derived(animationSpeed * (currentSettings?.animationSpeed || 1.0));
-	
+	const currentSettings = $derived($objects3DSettings);
+	const colorPalette = $derived($colorStore);
+	const currentDominantColor = $derived(dominantColor || colorPalette?.current || '#4a90e2');
+	const effectiveObjectId = $derived(objectId || config?.id || bookmarkCategory?.objectId || '');
+	const effectiveScale = $derived(scale * (currentSettings?.globalScale || 1.0));
+	const shouldAnimate = $derived(
+		enableAnimation && 
+		currentSettings?.enableAnimations && 
+		!staticPreview && 
+		!simplified3DMode
+	);
+	const effectiveAnimationSpeed = $derived(animationSpeed * (currentSettings?.animationSpeed || 1.0));
+
 	onMount(async () => {
-		if (!browser) {
-			handleError('Not in browser environment');
-			return;
-		}
-		
-		// Initialize performance monitor
-		performanceMonitor = new PerformanceMonitor();
-		
-		// Get context values
-		const contextRenderer = getContext('threeRenderer');
-		const contextWebGL = getContext('webGLSupported');
-		
-		sharedRenderer = contextRenderer || null;
-		webGLSupported = contextWebGL !== false;
-		
-		if (!webGLSupported) {
+		if (!browser || !webGLSupported) {
 			handleError('WebGL not supported');
 			return;
 		}
+
+		performanceMonitor = new PerformanceMonitor();
 		
 		try {
 			await initializeComponent();
@@ -112,11 +105,11 @@
 			handleError(error instanceof Error ? error.message : 'Unknown error');
 		}
 	});
-	
+
 	onDestroy(() => {
 		cleanup();
 	});
-	
+
 	async function initializeComponent(): Promise<void> {
 		const profileId = performanceMonitor?.startProfile('Object3D-init');
 		
@@ -124,43 +117,39 @@
 			if (!effectiveObjectId) {
 				throw new Error('No object ID provided');
 			}
-			
+
+			// Always use shared renderer when available for better performance
+			if (!sharedRenderer) {
+				throw new Error('Shared renderer not available');
+			}
+
 			await loadObjectConfig();
-			await setupRenderer();
 			await createObjectInstance();
-			
+
 			if (shouldAnimate && objectInstance) {
 				AnimationSystem.createIdleAnimation(objectInstance);
 			}
-			
-			if (dedicatedRenderer && componentMode !== 'bookmark') {
-				startRenderLoop();
-			}
-			
-			setupResizeObserver();
+
 			isInitialized = true;
-			
 		} catch (error) {
-			console.error('Component initialization failed:', error);
-			handleError(error instanceof Error ? error.message : 'Unknown error');
+			throw error;
 		} finally {
 			if (profileId && performanceMonitor) {
 				performanceMonitor.endProfile(profileId);
 			}
 		}
 	}
-	
+
 	async function loadObjectConfig(): Promise<void> {
 		if (config) {
 			objectConfig = config;
 			return;
 		}
-		
+
 		try {
-			const registry = Object3DRegistry;
-			await registry.initialize();
+			await Object3DRegistry.initialize();
+			const foundConfig = Object3DRegistry.getObjectById?.(effectiveObjectId);
 			
-			const foundConfig = registry.getObjectById?.(effectiveObjectId);
 			if (!foundConfig) {
 				throw new Error(`Object not found: ${effectiveObjectId}`);
 			}
@@ -170,292 +159,167 @@
 			throw new Error(`Failed to load object config: ${error}`);
 		}
 	}
-	
-	async function setupRenderer(): Promise<void> {
-		if (componentMode === 'bookmark' && sharedRenderer) {
-			return;
-		}
-		
-		if (!canvasElement) {
-			throw new Error('Canvas element not available');
-		}
-		
-		try {
-			const webGL = WebGLContextManager.getInstance();
-			dedicatedRenderer = webGL.createRenderer(canvasElement);
-			
-			scene = new THREE.Scene();
-			camera = new THREE.PerspectiveCamera(
-				75, 
-				canvasElement.clientWidth / canvasElement.clientHeight, 
-				0.1, 
-				1000
-			);
-			camera.position.z = 5;
-			
-			// Add lighting
-			const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-			scene.add(ambientLight);
-			
-			const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-			directionalLight.position.set(5, 5, 5);
-			if (currentSettings?.enableShadows) {
-				directionalLight.castShadow = true;
-			}
-			scene.add(directionalLight);
-			
-			// Configure renderer settings
-			if (currentSettings?.antiAliasing) {
-				dedicatedRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-			}
-			
-			if (currentSettings?.enableShadows) {
-				dedicatedRenderer.shadowMap.enabled = true;
-				dedicatedRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
-			}
-			
-		} catch (error) {
-			throw new Error(`Renderer setup failed: ${error}`);
-		}
-	}
-	
+
 	async function createObjectInstance(): Promise<void> {
 		if (!objectConfig) {
 			throw new Error('No object configuration available');
 		}
-		
+
 		try {
-			const registry = Object3DRegistry;
-			objectInstance = await registry.createInstance(objectConfig.id, {
-				position: componentMode === 'bookmark' ? position : { x: 0, y: 0 },
+			objectInstance = await Object3DRegistry.createInstance(objectConfig.id, {
+				position,
 				scale: effectiveScale,
 				dominantColor: currentDominantColor,
 				customization: customization || {}
 			});
-			
+
 			if (!objectInstance) {
 				throw new Error('Failed to create object instance');
 			}
-			
-			// Configure material based on settings
-			const material = objectInstance.mesh.material as THREE.Material;
+
+			// Configure material quality based on device capabilities
+			const material = objectInstance.mesh.material;
 			if (currentSettings?.materialQuality) {
 				configureMaterialQuality(material, currentSettings.materialQuality);
 			}
-			
-			if (scene && componentMode !== 'bookmark') {
-				scene.add(objectInstance.mesh);
+
+			// Add to shared renderer
+			if (sharedRenderer && componentMode === 'bookmark') {
+				sharedRenderer.addObject(objectInstance.id, objectInstance.mesh);
 			}
-			
+
 		} catch (error) {
 			throw new Error(`Object creation failed: ${error}`);
 		}
 	}
-	
-	function configureMaterialQuality(material: THREE.Material, quality: string): void {
-		if ('roughness' in material && 'metalness' in material) {
-			const physicalMaterial = material as THREE.MeshPhysicalMaterial;
-			switch (quality) {
-				case 'low':
-					physicalMaterial.roughness = 0.8;
-					physicalMaterial.metalness = 0.2;
-					break;
-				case 'medium':
-					physicalMaterial.roughness = 0.5;
-					physicalMaterial.metalness = 0.5;
-					break;
-				case 'high':
-					physicalMaterial.roughness = 0.2;
-					physicalMaterial.metalness = 0.8;
-					break;
-			}
-		}
-	}
-	
-	function setupResizeObserver(): void {
-		if (!containerElement) return;
+
+	function configureMaterialQuality(material: any, quality: string): void {
+		if (!('roughness' in material && 'metalness' in material)) return;
 		
-		resizeObserver = new ResizeObserver((entries) => {
-			for (const entry of entries) {
-				const { width, height } = entry.contentRect;
-				if (canvasElement && camera) {
-					canvasElement.width = width;
-					canvasElement.height = height;
-					camera.aspect = width / height;
-					camera.updateProjectionMatrix();
-					
-					if (dedicatedRenderer) {
-						dedicatedRenderer.setSize(width, height);
-					}
-				}
-			}
-		});
+		const settings = {
+			low: { roughness: 0.8, metalness: 0.2 },
+			medium: { roughness: 0.5, metalness: 0.5 },
+			high: { roughness: 0.2, metalness: 0.8 }
+		}[quality] || settings.medium;
 		
-		resizeObserver.observe(containerElement);
+		Object.assign(material, settings);
 	}
-	
-	function startRenderLoop(): void {
-		const render = (time: number) => {
-			if (!isInitialized || !dedicatedRenderer || !scene || !camera) return;
-			
-			const deltaTime = time - lastFrameTime;
-			lastFrameTime = time;
-			
-			if (shouldAnimate && objectInstance) {
-				AnimationSystem.update(objectInstance.id, deltaTime * effectiveAnimationSpeed);
-			}
-			
-			dedicatedRenderer.render(scene, camera);
-			
-			if (shouldAnimate) {
-				animationFrameId = requestAnimationFrame(render);
-			}
-		};
-		
-		animationFrameId = requestAnimationFrame(render);
-	}
-	
+
 	function handleError(message: string): void {
 		hasError = true;
 		errorMessage = message;
 		console.error('Object3D Error:', message);
-		
+
 		if (fallbackTo2D) {
 			dispatch('fallback', { reason: message });
 		} else {
 			dispatch('error', { message });
 		}
 	}
-	
-	function handleClick(event: MouseEvent | KeyboardEvent): void {
+
+	function handleInteraction(event: Event, type: 'click' | 'contextmenu'): void {
 		if (hasError || !interactive) return;
-		dispatch('click', { 
+		
+		dispatch(type, { 
 			event, 
 			objectId: effectiveObjectId, 
 			instance: objectInstance,
 			config: objectConfig
 		});
 	}
-	
+
 	function handleMouseEnter(): void {
-		if (!interactive) return;
+		if (!interactive || hasError) return;
+		
 		isHovered = true;
 		if (objectInstance) {
 			objectInstance.state.isHovered = true;
 			objectInstance.state.isIdle = false;
-			
+
 			if (currentSettings?.interaction?.enableHover) {
 				const hoverScale = currentSettings.interaction.hoverScale || 1.1;
 				objectInstance.mesh.scale.multiplyScalar(hoverScale);
 			}
 		}
 	}
-	
+
 	function handleMouseLeave(): void {
 		if (!interactive) return;
+		
 		isHovered = false;
 		if (objectInstance) {
 			objectInstance.state.isHovered = false;
 			objectInstance.state.isIdle = !isActive;
-			
+
 			if (currentSettings?.interaction?.enableHover) {
 				objectInstance.mesh.scale.setScalar(effectiveScale);
 			}
 		}
 	}
-	
-	function handleContextMenu(event: MouseEvent): void {
-		if (!interactive) return;
-		event.preventDefault();
-		dispatch('contextmenu', { 
-			event, 
-			objectId: effectiveObjectId, 
-			instance: objectInstance,
-			config: objectConfig
-		});
-	}
-	
+
 	function handleKeyDown(event: KeyboardEvent): void {
-		if (!interactive) return;
+		if (!interactive || hasError) return;
+		
 		if (event.key === 'Enter' || event.key === ' ') {
 			event.preventDefault();
-			handleClick(event);
+			handleInteraction(event, 'click');
 		}
 	}
-	
+
+	// Public API
 	export function updateConfiguration(newConfig: Partial<Object3DConfig>): void {
 		try {
-			if (objectConfig && objectInstance) {
-				objectConfig = { ...objectConfig, ...newConfig };
-				
-				if (newConfig.scale !== undefined) {
-					objectInstance.mesh.scale.setScalar(newConfig.scale * effectiveScale);
-				}
-				
-				if (newConfig.opacity !== undefined) {
-					const material = objectInstance.mesh.material as THREE.Material;
-					if ('opacity' in material) {
-						material.opacity = newConfig.opacity;
-						material.transparent = newConfig.opacity < 1;
-					}
+			if (!objectConfig || !objectInstance) return;
+			
+			objectConfig = { ...objectConfig, ...newConfig };
+
+			if (newConfig.scale !== undefined) {
+				objectInstance.mesh.scale.setScalar(newConfig.scale * effectiveScale);
+			}
+
+			if (newConfig.opacity !== undefined) {
+				const material = objectInstance.mesh.material as any;
+				if ('opacity' in material) {
+					material.opacity = newConfig.opacity;
+					material.transparent = newConfig.opacity < 1;
+					material.needsUpdate = true;
 				}
 			}
-			
-			renderFrame();
 		} catch (error) {
 			console.error('Configuration update failed:', error);
 		}
 	}
-	
+
 	export function getObjectInstance(): Object3DInstance | null {
 		return objectInstance;
 	}
-	
+
 	export function getPerformanceMetrics() {
 		if (!objectInstance || !performanceMonitor) return null;
 		return performanceMonitor.getMetrics({ name: objectInstance.id });
 	}
-	
-	function renderFrame(): void {
-		if (dedicatedRenderer && scene && camera) {
-			dedicatedRenderer.render(scene, camera);
-		}
-	}
-	
+
 	function cleanup(): void {
-		if (animationFrameId) {
-			cancelAnimationFrame(animationFrameId);
-			animationFrameId = 0;
-		}
-		
 		if (objectInstance) {
-			AnimationSystem.dispose(objectInstance.id);
+			if (shouldAnimate) {
+				AnimationSystem.dispose(objectInstance.id);
+			}
+			
+			if (sharedRenderer && componentMode === 'bookmark') {
+				sharedRenderer.removeObject(objectInstance.id);
+			}
+			
 			Object3DRegistry.disposeInstance(objectInstance);
 			objectInstance = null;
 		}
-		
-		if (dedicatedRenderer) {
-			dedicatedRenderer.dispose();
-			dedicatedRenderer = null;
-		}
-		
-		if (resizeObserver) {
-			resizeObserver.disconnect();
-			resizeObserver = null;
-		}
-		
-		if (performanceMonitor) {
-			performanceMonitor.destroy();
-		}
-		
-		scene = null;
-		camera = null;
+
+		performanceMonitor?.destroy();
 		isInitialized = false;
 	}
-	
-	// Reactive updates
+
+	// Reactive updates - optimized to prevent unnecessary work
 	$effect(() => {
-		if (isInitialized && currentDominantColor && objectInstance && ColorAdapter) {
+		if (isInitialized && currentDominantColor && objectInstance) {
 			ColorAdapter.adaptMaterial(
 				objectInstance.mesh.material,
 				{ ...colorPalette, dominant: currentDominantColor },
@@ -464,33 +328,33 @@
 					intensity: 1,
 					saturationBoost: 0.2,
 					lightnessAdjust: 0,
-					blendMode: 'normal',
 					emissiveStrength: 0.3,
 					transitionDuration: 800
 				}
 			);
-			renderFrame();
 		}
 	});
-	
+
 	$effect(() => {
 		if (isInitialized && effectiveScale && objectInstance) {
 			objectInstance.mesh.scale.setScalar(effectiveScale);
-			renderFrame();
 		}
 	});
-	
+
 	$effect(() => {
-		if (isInitialized && objectInstance && isActive !== objectInstance.state.isActive) {
+		if (isInitialized && objectInstance) {
+			const wasActive = objectInstance.state.isActive;
 			objectInstance.state.isActive = isActive;
 			objectInstance.state.isIdle = !isActive && !isHovered;
-			
-			if (currentSettings?.interaction?.enableClick && isActive) {
+
+			if (currentSettings?.interaction?.enableClick && isActive && !wasActive) {
 				const clickScale = currentSettings.interaction.clickScale || 0.95;
+				const originalScale = objectInstance.mesh.scale.x;
 				objectInstance.mesh.scale.multiplyScalar(clickScale);
+				
 				setTimeout(() => {
 					if (objectInstance) {
-						objectInstance.mesh.scale.setScalar(effectiveScale);
+						objectInstance.mesh.scale.setScalar(originalScale);
 					}
 				}, 100);
 			}
@@ -499,32 +363,51 @@
 </script>
 
 {#if componentMode === 'bookmark'}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div 
-		class="object-3d-bookmark"
-		class:active={isActive}
-		class:hovered={isHovered}
-		class:error={hasError}
-		class:interactive
-		style="--object-size: {size}px;"
-		bind:this={containerElement}
-		onclick={handleClick}
-		onkeydown={handleKeyDown}
-		onmouseenter={handleMouseEnter}
-		onmouseleave={handleMouseLeave}
-		oncontextmenu={handleContextMenu}
-		role={interactive ? 'button' : 'img'}
-		tabindex={interactive ? 0 : -1}
-		aria-label={bookmarkCategory ? `3D object for ${bookmarkCategory.name}` : '3D object'}
-		aria-pressed={interactive ? isActive : undefined}
-		aria-describedby={hasError ? 'error-description' : undefined}
-	>
-		{#if hasError && fallbackTo2D}
-			<div class="fallback-2d" aria-label="2D fallback representation">
-				<div class="fallback-icon">📦</div>
-			</div>
-		{/if}
-	</div>
+  {#if interactive}
+    <div 
+      class="object-3d-bookmark"
+      class:active={isActive}
+      class:hovered={isHovered}
+      class:error={hasError}
+      class:interactive
+      style="--object-size: {size}px;"
+      bind:this={containerElement}
+      onclick={(e) => handleInteraction(e, 'click')}
+      onkeydown={handleKeyDown}
+      onmouseenter={handleMouseEnter}
+      onmouseleave={handleMouseLeave}
+      oncontextmenu={(e) => handleInteraction(e, 'contextmenu')}
+      role="button"
+      tabindex="0"
+      aria-label={bookmarkCategory ? `3D object for ${bookmarkCategory.name}` : '3D object'}
+      aria-pressed={isActive}
+      aria-describedby={hasError ? 'error-description' : undefined}
+    >
+      {#if hasError && fallbackTo2D}
+        <div class="fallback-2d" aria-label="2D fallback representation">
+          <div class="fallback-icon">📦</div>
+        </div>
+      {/if}
+    </div>
+  {:else}
+    <div 
+      class="object-3d-bookmark"
+      class:active={isActive}
+      class:hovered={isHovered}
+      class:error={hasError}
+      style="--object-size: {size}px;"
+      bind:this={containerElement}
+      role="img"
+      aria-label={bookmarkCategory ? `3D object for ${bookmarkCategory.name}` : '3D object'}
+      aria-describedby={hasError ? 'error-description' : undefined}
+    >
+      {#if hasError && fallbackTo2D}
+        <div class="fallback-2d" aria-label="2D fallback representation">
+          <div class="fallback-icon">📦</div>
+        </div>
+      {/if}
+    </div>
+  {/if}
 {:else}
 	<div 
 		class="object-3d-container"
@@ -536,22 +419,15 @@
 		aria-label={objectConfig ? `3D preview of ${objectConfig.name}` : '3D object preview'}
 		aria-describedby={hasError ? 'error-description' : undefined}
 	>
-		<canvas
-			bind:this={canvasElement}
-			width={size}
-			height={size}
-			aria-hidden="true"
-		></canvas>
-		
 		{#if hasError}
 			<div class="error-overlay" role="alert">
-				<div class="error-icon" aria-hidden="true">⚠️</div>
+				<div class="error-icon">⚠️</div>
 				<div class="error-message" id="error-description">
 					{errorMessage || '3D object failed to load'}
 				</div>
 				{#if fallbackTo2D}
 					<div class="fallback-2d">
-						<div class="fallback-icon" aria-hidden="true">📦</div>
+						<div class="fallback-icon">📦</div>
 					</div>
 				{/if}
 			</div>
@@ -602,13 +478,6 @@
 	.object-3d-container.preview-mode {
 		border-radius: 12px;
 		overflow: hidden;
-	}
-	
-	canvas {
-		display: block;
-		max-width: 100%;
-		max-height: 100%;
-		border-radius: inherit;
 	}
 	
 	.fallback-2d {

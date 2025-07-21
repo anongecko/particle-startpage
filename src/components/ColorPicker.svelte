@@ -680,6 +680,8 @@
 	style:--harmony-reveal={$harmonyReveal}
 	onmouseenter={() => isHovered = true}
 	onmouseleave={() => isHovered = false}
+  role="application"
+  aria-label="Color picker"
 >
 	{#if label}
 		<div class="picker-header">
@@ -722,7 +724,7 @@
 					aria-valuemax="360"
 					aria-valuetext="Hue {hue} degrees, Saturation {saturation}%, Lightness {lightness}%"
 					tabindex="0"
-				/>
+			></canvas>	
 				
 				<!-- Color indicator with enhanced styling -->
 				<div 
@@ -768,6 +770,7 @@
 			<div 
 				class="color-preview-container"
 				onclick={() => copyColorToClipboard()}
+        onkeydown={(e) => e.key === 'Enter' && copyColorToClipboard()}
 				title="Click to copy color"
 				role="button"
 				tabindex="0"

@@ -8,7 +8,7 @@
 	
 	import type { BookmarkCategory, BookmarkItem } from '$stores/bookmarks';
 	import { bookmarkStore } from '$stores/bookmarks';
-	import { settings } from '$stores/settings';
+	import { settingsStore } from '$stores/settings';
 	import { colorStore } from '$stores/color';
 	
 	interface Props {
@@ -56,7 +56,7 @@
 	
 	const dispatch = createEventDispatcher();
 	
-	let currentSettings = $derived(get(settings));
+	let currentSettings = $derived(get(settingsStore));
 	let colorPalette = $derived(get(colorStore));
 	let gradientColors = $derived(getGradientColors());
 	let textColor = $derived(getContrastColor(dominantColor));
@@ -610,6 +610,7 @@
 			style:transform="scale({$modalScale})"
 			style:opacity={$modalOpacity}
 			onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
 			role="document"
 		>
 			<div class="modal-header">
@@ -1285,12 +1286,6 @@
 		background: rgba(var(--primary-rgb), 0.15);
 		border-color: rgba(var(--primary-rgb), 0.5);
 		animation: drop-target-pulse 1s infinite;
-	}
-	
-	.bookmark-item.folder-creation-hint {
-		background: rgba(255, 193, 7, 0.15);
-		border-color: rgba(255, 193, 7, 0.5);
-		animation: folder-hint-bounce 0.6s ease-in-out;
 	}
 	
 	.bookmark-content {

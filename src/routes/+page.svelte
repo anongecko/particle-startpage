@@ -215,9 +215,11 @@
 			}
 			
 			// Set contexts for components
+      if (browser) {
 			setContext('webGLSupported', webGLSupported);
 			setContext('isMobile', isMobile);
 			setContext('simplified3DMode', simplified3DMode);
+      }
 			
 			console.log('Device capabilities detected:', { webGLSupported, isMobile, simplified3DMode });
 			

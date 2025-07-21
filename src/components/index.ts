@@ -1,29 +1,40 @@
-// ===== CORE SYSTEM COMPONENTS =====
-export { default as Background } from './Background.svelte';
-export { default as ParticleSystem } from './ParticleSystem.svelte';
-export { default as ErrorBoundary } from './ErrorBoundary.svelte';
+// ===== IMPORT ALL COMPONENTS FIRST =====
+import Background from './Background.svelte';
+import ParticleSystem from './ParticleSystem.svelte';
+import ErrorBoundary from './ErrorBoundary.svelte';
+import SearchBar from './SearchBar.svelte';
+import SettingsPanel from './SettingsPanel.svelte';
+import SetupWizard from './SetupWizard.svelte';
+import BookmarkGrid from './BookmarkGrid.svelte';
+import BookmarkItem from './BookmarkItem.svelte';
+import BookmarkModal from './BookmarkModal.svelte';
+import Object3D from './Object3D.svelte';
+import ContextMenu from './ContextMenu.svelte';
+import ObjectSelector from './ObjectSelector.svelte';
+import ColorPicker from './ColorPicker.svelte';
+import ThemeSelector from './ThemeSelector.svelte';
+import NotificationToast from './NotificationToast.svelte';
 
-// ===== UI INTERFACE COMPONENTS =====
-export { default as SearchBar } from './SearchBar.svelte';
-export { default as SettingsPanel } from './SettingsPanel.svelte';
-export { default as SetupWizard } from './SetupWizard.svelte';
+// ===== RE-EXPORT COMPONENTS =====
+export {
+	Background,
+	ParticleSystem,
+	ErrorBoundary,
+	SearchBar,
+	SettingsPanel,
+	SetupWizard,
+	BookmarkGrid,
+	BookmarkItem,
+	BookmarkModal,
+	Object3D,
+	ContextMenu,
+	ObjectSelector,
+	ColorPicker,
+	ThemeSelector,
+	NotificationToast
+};
 
-// ===== BOOKMARK SYSTEM COMPONENTS =====
-export { default as BookmarkGrid } from './BookmarkGrid.svelte';
-export { default as BookmarkItem } from './BookmarkItem.svelte';
-export { default as BookmarkModal } from './BookmarkModal.svelte';
-
-// ===== 3D OBJECT SYSTEM COMPONENTS =====
-export { default as Object3D } from './Object3D.svelte';
-export { default as ContextMenu } from './ContextMenu.svelte';
-export { default as ObjectSelector } from './ObjectSelector.svelte';
-
-// ===== UTILITY COMPONENTS =====
-export { default as ColorPicker } from './ColorPicker.svelte';
-export { default as ThemeSelector } from './ThemeSelector.svelte';
-export { default as NotificationToast } from './NotificationToast.svelte';
-
-// ===== COMPONENT GROUPS =====
+// ===== COMPONENT GROUPS (Now variables are in scope) =====
 export const CoreComponents = {
 	Background,
 	ParticleSystem,

@@ -347,6 +347,19 @@
 		}
 	}
 	
+	function handleModalKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			closeModal();
+		}
+	}
+	
+	function handleConfirmModalKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			showResetConfirm = false;
+			showImportDialog = false;
+		}
+	}
+	
 	function handleBackdropClick(event: MouseEvent) {
 		if (event.target === event.currentTarget) {
 			closeModal();
@@ -420,9 +433,11 @@
 	style:--header-glow={$headerGlow}
 	style:--setting-hover={$settingHover}
 	onclick={handleBackdropClick}
+	onkeydown={handleModalKeydown}
 	role="dialog"
 	aria-modal="true"
 	aria-labelledby="settings-title"
+	tabindex="-1"
 >
 	<div 
 		bind:this={panelElement}
@@ -468,7 +483,7 @@
 		</div>
 		
 		<div class="panel-body">
-			<nav class="settings-nav" role="tablist" aria-label="Settings categories">
+			<div class="settings-nav" role="tablist" aria-label="Settings categories">
 				{#each filteredTabs as tab}
 					<button 
 						class="nav-tab" 
@@ -486,9 +501,9 @@
 						<div class="tab-indicator"></div>
 					</button>
 				{/each}
-			</nav>
+			</div>
 			
-			<main 
+			<div 
 				class="settings-content"
 				style:transform="translateX({$tabSlideOffset}px)"
 				role="tabpanel"
@@ -1107,7 +1122,7 @@
 						</div>
 					</div>
 				{/if}
-			</main>
+			</div>
 		</div>
 	</div>
 </div>
@@ -1116,9 +1131,11 @@
 	<div 
 		class="confirm-modal" 
 		onclick={handleBackdropClick}
+		onkeydown={handleConfirmModalKeydown}
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="reset-title"
+		tabindex="-1"
 	>
 		<div class="confirm-dialog" role="document">
 			<h3 id="reset-title">Reset all settings?</h3>
@@ -1147,9 +1164,11 @@
 	<div 
 		class="confirm-modal" 
 		onclick={handleBackdropClick}
+		onkeydown={handleConfirmModalKeydown}
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="import-title"
+		tabindex="-1"
 	>
 		<div class="confirm-dialog" role="document">
 			<h3 id="import-title">Import Settings</h3>

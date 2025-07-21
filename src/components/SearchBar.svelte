@@ -778,7 +778,6 @@
 			onkeydown={handleKeyDown}
 			aria-label="Search input with smart suggestions"
 			aria-describedby={showSuggestions ? 'search-suggestions' : undefined}
-			aria-expanded={showSuggestions}
 			aria-autocomplete="list"
 		/>
 		

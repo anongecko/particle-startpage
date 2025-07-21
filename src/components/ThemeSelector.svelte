@@ -33,7 +33,7 @@
 	
 	let hoveredTheme: string | null = $state(null);
 	let focusedIndex = $state(0);
-	let selectorElement: HTMLDivElement;
+	let selectorElement = $state();
 	
 	const themes: Theme[] = [
 		{

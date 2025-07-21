@@ -2,7 +2,6 @@
 
 // API & Networking
 export * from './api';
-export { default as api } from './api';
 
 // Storage & Persistence
 export * from './storage';
