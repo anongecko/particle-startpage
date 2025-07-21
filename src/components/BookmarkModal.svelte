@@ -3,108 +3,207 @@
 	import { browser } from '$app/environment';
 	import { get } from 'svelte/store';
 	import { fade, scale, fly } from 'svelte/transition';
-	import { cubicOut, elasticOut } from 'svelte/easing';
+	import { cubicOut, elasticOut, backOut, expoOut } from 'svelte/easing';
+	import { tweened } from 'svelte/motion';
 	
 	import type { BookmarkCategory, BookmarkItem } from '$stores/bookmarks';
 	import { bookmarkStore } from '$stores/bookmarks';
 	import { settings } from '$stores/settings';
 	import { colorStore } from '$stores/color';
 	
-	export let category: BookmarkCategory;
-	export let visible: boolean = false;
+	interface Props {
+		category: BookmarkCategory;
+		visible?: boolean;
+		dominantColor?: string;
+	}
 	
-	let modalElement: HTMLElement;
-	let searchInput: HTMLInputElement;
-	let bookmarksContainer: HTMLElement;
-	let isClosing = false;
-	let searchQuery = '';
-	let showLabels = false;
-	let isDragging = false;
-	let draggedBookmark: BookmarkItem | null = null;
-	let dropTarget: BookmarkItem | null = null;
-	let hoverTimeout: NodeJS.Timeout | null = null;
-	let focusedElementBeforeModal: HTMLElement | null = null;
+	let { 
+		category, 
+		visible = false, 
+		dominantColor = '#4a90e2' 
+	}: Props = $props();
 	
-	let dragStartPosition = { x: 0, y: 0 };
-	let dragOffset = { x: 0, y: 0 };
-	let draggedElement: HTMLElement | null = null;
-	let dropZones = new Set<string>();
+	let modalElement: HTMLElement = $state();
+	let searchInput: HTMLInputElement = $state();
+	let bookmarksContainer: HTMLElement = $state();
+	let isClosing = $state(false);
+	let searchQuery = $state('');
+	let showLabels = $state(false);
+	let isDragging = $state(false);
+	let draggedBookmark: BookmarkItem | null = $state(null);
+	let dropTarget: BookmarkItem | null = $state(null);
+	let hoverTimeout: NodeJS.Timeout | null = $state(null);
+	let focusedElementBeforeModal: HTMLElement | null = $state(null);
+	let isSearchFocused = $state(false);
+	let selectedBookmarkIndex = $state(-1);
 	
-	let filteredBookmarks: BookmarkItem[] = [];
-	let searchActive = false;
-	let typingTimeout: NodeJS.Timeout | null = null;
+	let dragStartPosition = $state({ x: 0, y: 0 });
+	let draggedElement: HTMLElement | null = $state(null);
+	let dropIndicatorPosition = $state({ x: 0, y: 0, visible: false });
 	
-	let loadedFavicons = new Set<string>();
-	let failedFavicons = new Set<string>();
-	let visibleBookmarks = new Set<string>();
-	let intersectionObserver: IntersectionObserver | null = null;
+	let filteredBookmarksState = $state([]);
+	let typingTimeout: NodeJS.Timeout | null = $state(null);
+	
+	let loadedFavicons = $state(new Set<string>());
+	let failedFavicons = $state(new Set<string>());
+	let visibleBookmarksSet = $state(new Set<string>());
+	let intersectionObserver: IntersectionObserver | null = $state(null);
+	
+	const modalScale = tweened(0.85, { duration: 400, easing: backOut });
+	const modalOpacity = tweened(0, { duration: 300, easing: cubicOut });
+	const searchGlow = tweened(0, { duration: 300, easing: cubicOut });
+	const dragIndicatorOpacity = tweened(0, { duration: 200, easing: cubicOut });
 	
 	const dispatch = createEventDispatcher();
 	
-	$: currentSettings = get(settings);
-	$: colorPalette = get(colorStore);
-	$: showLabels = currentSettings.showBookmarkLabels || false;
-	$: filteredBookmarks = filterBookmarks(category.bookmarks, searchQuery);
-	$: modalBackgroundColor = colorPalette.darkest || '#1a1a1a';
-	$: modalBorderColor = colorPalette.accent || colorPalette.current || '#4a90e2';
-	$: modalTextColor = getContrastColor(modalBackgroundColor);
+	let currentSettings = $derived(get(settings));
+	let colorPalette = $derived(get(colorStore));
+	let gradientColors = $derived(getGradientColors());
+	let textColor = $derived(getContrastColor(dominantColor));
+	let filteredBookmarksCount = $derived(filteredBookmarksState.length);
+	let hasSearchQuery = $derived(searchQuery.trim().length > 0);
+	let filteredBookmarksVisible = $derived(filteredBookmarksState.slice(0, 50)); // Performance optimization
 	
-	onMount(() => {
-		if (!browser) return;
+	function getGradientColors(): { primary: string; secondary: string; rgb: string } {
+		const rgb = hexToRgb(dominantColor);
+		if (!rgb) return { 
+			primary: '#4a90e2', 
+			secondary: '#357abd',
+			rgb: '74, 144, 226'
+		};
 		
-		focusedElementBeforeModal = document.activeElement as HTMLElement;
-		setupEventListeners();
-		setupIntersectionObserver();
+		const primary = dominantColor;
+		const secondary = `rgb(${Math.max(0, rgb.r - 50)}, ${Math.max(0, rgb.g - 50)}, ${Math.max(0, rgb.b - 50)})`;
+		const rgbString = `${rgb.r}, ${rgb.g}, ${rgb.b}`;
 		
-		setTimeout(() => {
-			if (searchInput && visible) {
-				searchInput.focus();
-			}
-		}, 300);
-		
-		console.log('BookmarkModal initialized for category:', category.name);
-	});
+		return { primary, secondary, rgb: rgbString };
+	}
 	
-	onDestroy(() => {
-		cleanup();
-		if (focusedElementBeforeModal) {
-			focusedElementBeforeModal.focus();
-		}
-	});
+	function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+		const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+		return result ? {
+			r: parseInt(result[1], 16),
+			g: parseInt(result[2], 16),
+			b: parseInt(result[3], 16)
+		} : null;
+	}
+	
+	function getContrastColor(backgroundColor: string): string {
+		const rgb = hexToRgb(backgroundColor);
+		if (!rgb) return '#ffffff';
+		
+		const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+		return luminance > 0.5 ? '#1a1a1a' : '#ffffff';
+	}
 	
 	function filterBookmarks(bookmarks: BookmarkItem[], query: string): BookmarkItem[] {
 		if (!query.trim()) return bookmarks;
 		
 		const searchTerm = query.toLowerCase();
-		return bookmarks.filter(bookmark => 
-			bookmark.title.toLowerCase().includes(searchTerm) ||
-			bookmark.url.toLowerCase().includes(searchTerm) ||
-			bookmark.description?.toLowerCase().includes(searchTerm) ||
-			bookmark.tags.some(tag => tag.toLowerCase().includes(searchTerm))
-		);
+		const results = bookmarks.filter(bookmark => {
+			const titleMatch = bookmark.title.toLowerCase().includes(searchTerm);
+			const urlMatch = bookmark.url.toLowerCase().includes(searchTerm);
+			const descMatch = bookmark.description?.toLowerCase().includes(searchTerm) || false;
+			const tagMatch = bookmark.tags.some(tag => tag.toLowerCase().includes(searchTerm));
+			
+			return titleMatch || urlMatch || descMatch || tagMatch;
+		});
+		
+		// Sort by relevance (title matches first, then URL, etc.)
+		return results.sort((a, b) => {
+			const aTitle = a.title.toLowerCase();
+			const bTitle = b.title.toLowerCase();
+			const term = searchTerm;
+			
+			if (aTitle.startsWith(term) && !bTitle.startsWith(term)) return -1;
+			if (!aTitle.startsWith(term) && bTitle.startsWith(term)) return 1;
+			if (aTitle.includes(term) && !bTitle.includes(term)) return -1;
+			if (!aTitle.includes(term) && bTitle.includes(term)) return 1;
+			
+			return a.title.localeCompare(b.title);
+		});
 	}
 	
 	function setupEventListeners(): void {
 		document.addEventListener('keydown', handleGlobalKeyDown);
+		document.addEventListener('click', handleClickOutside);
+	}
+	
+	function handleClickOutside(event: MouseEvent): void {
+		const target = event.target as HTMLElement;
+		if (modalElement && !modalElement.contains(target)) {
+			closeModal();
+		}
 	}
 	
 	function handleGlobalKeyDown(event: KeyboardEvent): void {
 		if (!visible) return;
 		
-		if (event.key === 'Escape') {
-			event.preventDefault();
-			closeModal();
-		} else if (event.key === 'Enter' && event.target === searchInput) {
-			event.preventDefault();
-			if (filteredBookmarks.length > 0) {
-				handleBookmarkActivate(filteredBookmarks[0], event);
-			}
+		switch (event.key) {
+			case 'Escape':
+				event.preventDefault();
+				closeModal();
+				break;
+			case 'Enter':
+				if (event.target === searchInput) {
+					event.preventDefault();
+					if (filteredBookmarksVisible.length > 0) {
+						const targetBookmark = selectedBookmarkIndex >= 0 ? 
+							filteredBookmarksVisible[selectedBookmarkIndex] : 
+							filteredBookmarksVisible[0];
+						handleBookmarkActivate(targetBookmark, event);
+					}
+				}
+				break;
+			case 'ArrowDown':
+				if (filteredBookmarksVisible.length > 0) {
+					event.preventDefault();
+					selectedBookmarkIndex = Math.min(selectedBookmarkIndex + 1, filteredBookmarksVisible.length - 1);
+					scrollToSelectedBookmark();
+				}
+				break;
+			case 'ArrowUp':
+				if (filteredBookmarksVisible.length > 0) {
+					event.preventDefault();
+					selectedBookmarkIndex = Math.max(selectedBookmarkIndex - 1, -1);
+					scrollToSelectedBookmark();
+				}
+				break;
+			case '/':
+				if (event.target !== searchInput) {
+					event.preventDefault();
+					searchInput?.focus();
+				}
+				break;
+		}
+	}
+	
+	function scrollToSelectedBookmark(): void {
+		if (selectedBookmarkIndex < 0) return;
+		
+		const selectedElement = bookmarksContainer?.querySelector(
+			`[data-bookmark-index="${selectedBookmarkIndex}"]`
+		);
+		
+		if (selectedElement) {
+			selectedElement.scrollIntoView({ 
+				behavior: 'smooth', 
+				block: 'nearest' 
+			});
 		}
 	}
 	
 	function handleSearchInput(event: InputEvent): void {
 		const target = event.target as HTMLInputElement;
 		searchQuery = target.value;
+		selectedBookmarkIndex = -1;
+		
+		// Visual feedback for search
+		if (searchQuery.trim()) {
+			searchGlow.set(1).then(() => {
+				setTimeout(() => searchGlow.set(0), 600);
+			});
+		}
 		
 		if (typingTimeout) clearTimeout(typingTimeout);
 		
@@ -119,9 +218,22 @@
 		}, 500);
 	}
 	
+	function handleSearchFocus(): void {
+		isSearchFocused = true;
+		searchGlow.set(0.6);
+	}
+	
+	function handleSearchBlur(): void {
+		isSearchFocused = false;
+		if (!hasSearchQuery) {
+			searchGlow.set(0);
+		}
+	}
+	
 	function clearSearch(): void {
 		searchQuery = '';
-		searchActive = false;
+		selectedBookmarkIndex = -1;
+		searchGlow.set(0);
 		if (searchInput) {
 			searchInput.focus();
 		}
@@ -135,13 +247,7 @@
 		draggedElement = (event.target as HTMLElement).closest('.bookmark-item');
 		
 		if (draggedElement) {
-			const rect = draggedElement.getBoundingClientRect();
-			dragOffset = {
-				x: event.clientX - rect.left,
-				y: event.clientY - rect.top
-			};
-			
-			draggedElement.classList.add('dragging');
+			draggedElement.classList.add('is-dragging');
 			draggedElement.setAttribute('aria-grabbed', 'true');
 		}
 		
@@ -150,6 +256,9 @@
 			event.dataTransfer.setData('text/plain', bookmark.id);
 			event.dataTransfer.setData('application/x-bookmark', JSON.stringify(bookmark));
 		}
+		
+		// Visual feedback
+		dragIndicatorOpacity.set(1);
 		
 		dispatch('drag-start', { bookmark });
 	}
@@ -160,6 +269,14 @@
 		event.preventDefault();
 		event.dataTransfer!.dropEffect = 'move';
 		
+		// Update drop indicator position
+		const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+		dropIndicatorPosition = {
+			x: rect.left + rect.width / 2,
+			y: rect.top + rect.height / 2,
+			visible: true
+		};
+		
 		if (dropTarget?.id !== bookmark.id) {
 			dropTarget = bookmark;
 			
@@ -169,7 +286,16 @@
 				if (dropTarget && draggedBookmark && dropTarget.id !== draggedBookmark.id) {
 					showFolderCreationHint(dropTarget);
 				}
-			}, 800);
+			}, 1000);
+		}
+	}
+	
+	function handleDragLeave(): void {
+		dropIndicatorPosition.visible = false;
+		
+		if (hoverTimeout) {
+			clearTimeout(hoverTimeout);
+			hoverTimeout = null;
 		}
 	}
 	
@@ -197,6 +323,9 @@
 		isDragging = false;
 		draggedBookmark = null;
 		dropTarget = null;
+		dropIndicatorPosition.visible = false;
+		
+		dragIndicatorOpacity.set(0);
 		
 		if (hoverTimeout) {
 			clearTimeout(hoverTimeout);
@@ -204,16 +333,14 @@
 		}
 		
 		if (draggedElement) {
-			draggedElement.classList.remove('dragging');
+			draggedElement.classList.remove('is-dragging');
 			draggedElement.setAttribute('aria-grabbed', 'false');
 			draggedElement = null;
 		}
 		
-		dropZones.clear();
-		
-		// Remove folder hint classes
-		document.querySelectorAll('.folder-drop-target').forEach(el => {
-			el.classList.remove('folder-drop-target');
+		// Remove visual hints
+		document.querySelectorAll('.folder-creation-hint').forEach(el => {
+			el.classList.remove('folder-creation-hint');
 		});
 	}
 	
@@ -242,14 +369,15 @@
 	function showFolderCreationHint(bookmark: BookmarkItem): void {
 		const element = document.querySelector(`[data-bookmark-id="${bookmark.id}"]`);
 		if (element) {
-			element.classList.add('folder-drop-target');
+			element.classList.add('folder-creation-hint');
 			setTimeout(() => {
-				element.classList.remove('folder-drop-target');
+				element.classList.remove('folder-creation-hint');
 			}, 2000);
 		}
 	}
 	
-	function handleBookmarkClick(bookmark: BookmarkItem, event: MouseEvent): void {
+	function handleBookmarkClick(bookmark: BookmarkItem, event: MouseEvent, index: number): void {
+		selectedBookmarkIndex = index;
 		handleBookmarkActivate(bookmark, event);
 	}
 	
@@ -314,11 +442,13 @@
 		clearSearch();
 		endDrag();
 		
-		dispatch('close');
+		modalScale.set(0.85);
+		modalOpacity.set(0);
 		
 		setTimeout(() => {
+			dispatch('close');
 			isClosing = false;
-		}, 300);
+		}, 200);
 	}
 	
 	function getFaviconUrl(bookmark: BookmarkItem): string {
@@ -334,11 +464,11 @@
 	}
 	
 	function handleFaviconLoad(bookmark: BookmarkItem): void {
-		loadedFavicons.add(bookmark.id);
+		loadedFavicons = new Set([...loadedFavicons, bookmark.id]);
 	}
 	
 	function handleFaviconError(bookmark: BookmarkItem): void {
-		failedFavicons.add(bookmark.id);
+		failedFavicons = new Set([...failedFavicons, bookmark.id]);
 	}
 	
 	function getFallbackIcon(bookmark: BookmarkItem): string {
@@ -358,9 +488,11 @@
 				const bookmarkId = entry.target.getAttribute('data-bookmark-id');
 				if (bookmarkId) {
 					if (entry.isIntersecting) {
-						visibleBookmarks.add(bookmarkId);
+						visibleBookmarksSet = new Set([...visibleBookmarksSet, bookmarkId]);
 					} else {
-						visibleBookmarks.delete(bookmarkId);
+						const newSet = new Set(visibleBookmarksSet);
+						newSet.delete(bookmarkId);
+						visibleBookmarksSet = newSet;
 					}
 				}
 			});
@@ -373,19 +505,6 @@
 			const bookmarkElements = bookmarksContainer?.querySelectorAll('[data-bookmark-id]');
 			bookmarkElements?.forEach(el => intersectionObserver!.observe(el));
 		}, 100);
-	}
-	
-	function getContrastColor(backgroundColor: string): string {
-		try {
-			const hex = backgroundColor.replace('#', '');
-			const r = parseInt(hex.substr(0, 2), 16);
-			const g = parseInt(hex.substr(2, 2), 16);
-			const b = parseInt(hex.substr(4, 2), 16);
-			const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-			return luminance > 0.5 ? '#000000' : '#ffffff';
-		} catch {
-			return '#ffffff';
-		}
 	}
 	
 	function handleModalKeyDown(event: KeyboardEvent): void {
@@ -425,146 +544,209 @@
 			intersectionObserver = null;
 		}
 		document.removeEventListener('keydown', handleGlobalKeyDown);
+		document.removeEventListener('click', handleClickOutside);
 		endDrag();
 	}
+	
+	onMount(() => {
+		if (!browser) return;
+		
+		focusedElementBeforeModal = document.activeElement as HTMLElement;
+		setupEventListeners();
+		setupIntersectionObserver();
+		
+		modalScale.set(1);
+		modalOpacity.set(1);
+		
+		setTimeout(() => {
+			if (searchInput && visible) {
+				searchInput.focus();
+			}
+		}, 300);
+		
+		console.log('BookmarkModal initialized for category:', category.name);
+		
+		return cleanup;
+	});
+	
+	onDestroy(() => {
+		cleanup();
+		if (focusedElementBeforeModal) {
+			focusedElementBeforeModal.focus();
+		}
+	});
+	
+	$effect(() => {
+		filteredBookmarksState = filterBookmarks(category.bookmarks, searchQuery);
+	});
+	
+	$effect(() => {
+		showLabels = currentSettings.showBookmarkLabels || false;
+	});
 </script>
 
 {#if visible}
 	<div 
-		class="modal-overlay"
-		transition:fade={{ duration: 200 }}
-		on:click|self={closeModal}
-		on:keydown={handleModalKeyDown}
+		class="modal-backdrop"
+		transition:fade={{ duration: 300 }}
+		onclick={closeModal}
+		onkeydown={handleModalKeyDown}
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="modal-title"
+		tabindex="0"
+		style:--primary-rgb={gradientColors.rgb}
+		style:--primary-color={gradientColors.primary}
+		style:--secondary-color={gradientColors.secondary}
+		style:--text-color={textColor}
+		style:--search-glow={$searchGlow}
+		style:--modal-scale={$modalScale}
+		style:--modal-opacity={$modalOpacity}
+		style:--drag-indicator-opacity={$dragIndicatorOpacity}
 	>
 		<div 
-			class="bookmark-modal"
 			bind:this={modalElement}
-			transition:scale={{ duration: 300, easing: elasticOut, start: 0.8 }}
-			style="
-				--modal-bg: {modalBackgroundColor};
-				--modal-border: {modalBorderColor};
-				--modal-text: {modalTextColor};
-				--modal-accent: {colorPalette.accent || colorPalette.current};
-			"
+			class="bookmark-modal"
+			style:transform="scale({$modalScale})"
+			style:opacity={$modalOpacity}
+			onclick={(e) => e.stopPropagation()}
 			role="document"
-			tabindex="-1"
 		>
 			<div class="modal-header">
-				<div class="header-content">
-					<h2 id="modal-title" class="category-title">{category.name}</h2>
-					<div class="bookmark-stats" role="status" aria-live="polite">
-						{filteredBookmarks.length} 
-						{filteredBookmarks.length === 1 ? 'bookmark' : 'bookmarks'}
-						{#if searchQuery}
-							{#if filteredBookmarks.length !== category.bookmarks.length}
-								of {category.bookmarks.length}
+				<div class="header-main">
+					<div class="category-info">
+						<h2 id="modal-title" class="category-title">{category.name}</h2>
+						<div class="bookmark-count" role="status" aria-live="polite">
+							{filteredBookmarksCount} 
+							{filteredBookmarksCount === 1 ? 'bookmark' : 'bookmarks'}
+							{#if hasSearchQuery && filteredBookmarksCount !== category.bookmarks.length}
+								<span class="search-filter">of {category.bookmarks.length}</span>
 							{/if}
-						{/if}
-					</div>
-				</div>
-				
-				<div class="header-controls">
-					<div class="search-container" class:active={searchActive || searchQuery}>
-						<label for="bookmark-search" class="sr-only">Search bookmarks</label>
-						<div class="search-icon" aria-hidden="true">🔍</div>
-						<input
-							id="bookmark-search"
-							bind:this={searchInput}
-							bind:value={searchQuery}
-							on:input={handleSearchInput}
-							on:focus={() => searchActive = true}
-							on:blur={() => searchActive = !!searchQuery}
-							placeholder="Search bookmarks..."
-							class="search-input"
-							type="text"
-							aria-label="Search bookmarks"
-						/>
-						{#if searchQuery}
-							<button 
-								class="clear-search"
-								on:click={clearSearch}
-								aria-label="Clear search"
-								type="button"
-							>
-								×
-							</button>
-						{/if}
+						</div>
 					</div>
 					
-					<div class="view-controls">
+					<div class="header-actions">
+						<div class="search-wrapper">
+							<div class="search-container" class:focused={isSearchFocused} class:has-query={hasSearchQuery}>
+								<div class="search-icon" aria-hidden="true">
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+										<circle cx="11" cy="11" r="8"/>
+										<path d="m21 21-4.35-4.35"/>
+									</svg>
+								</div>
+								<input
+									bind:this={searchInput}
+									bind:value={searchQuery}
+									oninput={handleSearchInput}
+									onfocus={handleSearchFocus}
+									onblur={handleSearchBlur}
+									placeholder="Search bookmarks..."
+									class="search-input"
+									type="text"
+									autocomplete="off"
+									aria-label="Search bookmarks"
+								/>
+								{#if hasSearchQuery}
+									<button 
+										class="clear-search-btn"
+										onclick={clearSearch}
+										aria-label="Clear search"
+										type="button"
+									>
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+											<path d="m6 6 12 12M6 18 18 6"/>
+										</svg>
+									</button>
+								{/if}
+								<div class="search-glow-effect"></div>
+							</div>
+							<div class="search-shortcut-hint">Press / to search</div>
+						</div>
+						
 						<button 
-							class="toggle-labels"
+							class="toggle-labels-btn"
 							class:active={showLabels}
-							on:click={() => showLabels = !showLabels}
+							onclick={() => showLabels = !showLabels}
 							aria-label="Toggle bookmark labels"
 							aria-pressed={showLabels}
 							title="Toggle Labels"
 							type="button"
 						>
-							<span aria-hidden="true">📝</span>
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+								<polyline points="14,2 14,8 20,8"/>
+								<line x1="16" y1="13" x2="8" y2="13"/>
+								<line x1="16" y1="17" x2="8" y2="17"/>
+								<polyline points="10,9 9,9 8,9"/>
+							</svg>
+						</button>
+						
+						<button 
+							class="close-btn"
+							onclick={closeModal}
+							aria-label="Close bookmark modal"
+							type="button"
+						>
+							<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<path d="m6 6 12 12M6 18 18 6"/>
+							</svg>
 						</button>
 					</div>
-					
-					<button 
-						class="close-button"
-						on:click={closeModal}
-						aria-label="Close bookmark modal"
-						type="button"
-					>
-						<span aria-hidden="true">×</span>
-					</button>
 				</div>
 			</div>
 			
-			<div class="modal-content">
-				{#if filteredBookmarks.length === 0}
-					<div class="empty-bookmarks" role="status">
-						{#if searchQuery}
-							<div class="empty-icon" aria-hidden="true">🔍</div>
+			<div class="modal-body">
+				{#if filteredBookmarksCount === 0}
+					<div class="empty-state" role="status">
+						{#if hasSearchQuery}
+							<div class="empty-icon search-empty" aria-hidden="true">
+								<svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+									<circle cx="11" cy="11" r="8"/>
+									<path d="m21 21-4.35-4.35"/>
+								</svg>
+							</div>
 							<h3>No bookmarks found</h3>
-							<p>Try adjusting your search terms</p>
-							<button 
-								class="clear-search-btn" 
-								on:click={clearSearch}
-								type="button"
-							>
-								Clear Search
-							</button>
+							<p>Try adjusting your search terms or <button class="link-btn" onclick={clearSearch}>clear the search</button></p>
 						{:else}
-							<div class="empty-icon" aria-hidden="true">📌</div>
+							<div class="empty-icon" aria-hidden="true">
+								<svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+									<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>
+								</svg>
+							</div>
 							<h3>No bookmarks yet</h3>
-							<p>Add some bookmarks to get started</p>
+							<p>Add some bookmarks to this category to get started</p>
 						{/if}
 					</div>
 				{:else}
 					<div 
-						class="bookmarks-grid"
 						bind:this={bookmarksContainer}
+						class="bookmarks-grid"
 						class:dragging={isDragging}
 						role="grid"
-						aria-label="Bookmarks"
+						aria-label="Bookmarks grid"
 					>
-						{#each filteredBookmarks as bookmark, index (bookmark.id)}
+						{#each filteredBookmarksVisible as bookmark, index (bookmark.id)}
 							<div 
 								class="bookmark-item"
-								class:dragging={draggedBookmark?.id === bookmark.id}
+								class:is-dragging={draggedBookmark?.id === bookmark.id}
 								class:drop-target={dropTarget?.id === bookmark.id}
+								class:selected={selectedBookmarkIndex === index}
 								data-bookmark-id={bookmark.id}
+								data-bookmark-index={index}
 								draggable="true"
-								on:dragstart={(e) => handleDragStart(bookmark, e)}
-								on:dragover={(e) => handleDragOver(bookmark, e)}
-								on:drop={(e) => handleDrop(bookmark, e)}
-								on:dragend={handleDragEnd}
-								on:click={(e) => handleBookmarkClick(bookmark, e)}
-								on:keydown={(e) => handleBookmarkKeyDown(bookmark, e)}
-								on:contextmenu={(e) => handleBookmarkContextMenu(bookmark, e)}
-								transition:fly={{ 
+								ondragstart={(e) => handleDragStart(bookmark, e)}
+								ondragover={(e) => handleDragOver(bookmark, e)}
+								ondragleave={handleDragLeave}
+								ondrop={(e) => handleDrop(bookmark, e)}
+								ondragend={handleDragEnd}
+								onclick={(e) => handleBookmarkClick(bookmark, e, index)}
+								onkeydown={(e) => handleBookmarkKeyDown(bookmark, e)}
+								oncontextmenu={(e) => handleBookmarkContextMenu(bookmark, e)}
+								in:fly={{ 
 									y: 20, 
-									duration: 200, 
-									delay: Math.min(index * 50, 500) 
+									duration: 300, 
+									delay: Math.min(index * 30, 300),
+									easing: backOut
 								}}
 								role="gridcell"
 								tabindex="0"
@@ -572,43 +754,62 @@
 								aria-describedby="bookmark-desc-{bookmark.id}"
 								aria-grabbed="false"
 							>
-								<div class="bookmark-favicon">
-									{#if !failedFavicons.has(bookmark.id)}
-										<img
-											src={getFaviconUrl(bookmark)}
-											alt=""
-											loading="lazy"
-											on:load={() => handleFaviconLoad(bookmark)}
-											on:error={() => handleFaviconError(bookmark)}
-											class="favicon-image"
-											aria-hidden="true"
-										/>
-									{:else}
-										<div class="favicon-fallback" aria-hidden="true">
-											{getFallbackIcon(bookmark)}
+								<div class="bookmark-content">
+									<div class="bookmark-favicon">
+										{#if !failedFavicons.has(bookmark.id)}
+											<img
+												src={getFaviconUrl(bookmark)}
+												alt=""
+												loading="lazy"
+												onload={() => handleFaviconLoad(bookmark)}
+												onerror={() => handleFaviconError(bookmark)}
+												class="favicon-image"
+												aria-hidden="true"
+											/>
+										{:else}
+											<div class="favicon-fallback" aria-hidden="true">
+												{getFallbackIcon(bookmark)}
+											</div>
+										{/if}
+										<div class="favicon-glow"></div>
+									</div>
+									
+									{#if showLabels}
+										<div class="bookmark-label" id="bookmark-desc-{bookmark.id}">
+											<span class="bookmark-title">{bookmark.title}</span>
+											{#if bookmark.description}
+												<span class="bookmark-description">{bookmark.description}</span>
+											{/if}
 										</div>
 									{/if}
 								</div>
 								
-								{#if showLabels}
-									<div 
-										class="bookmark-label" 
-										transition:fade={{ duration: 150 }}
-										id="bookmark-desc-{bookmark.id}"
-									>
-										<span class="bookmark-title">{bookmark.title}</span>
-										{#if bookmark.description}
-											<span class="bookmark-description">{bookmark.description}</span>
-										{/if}
+								<div class="bookmark-hover-overlay">
+									<div class="quick-actions">
+										<button 
+											class="quick-action-btn"
+											onclick={(e) => { e.stopPropagation(); window.open(bookmark.url, '_blank'); }}
+											aria-label="Open in new tab"
+											type="button"
+										>
+											<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+												<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+												<polyline points="15,3 21,3 21,9"/>
+												<line x1="10" y1="14" x2="21" y2="3"/>
+											</svg>
+										</button>
 									</div>
-								{/if}
+								</div>
 								
-								<div 
-									class="drag-handle" 
-									title="Drag to reorder or create folder"
-									aria-hidden="true"
-								>
-									⋮⋮
+								<div class="drag-handle" aria-hidden="true">
+									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+										<circle cx="9" cy="12" r="1"/>
+										<circle cx="9" cy="5" r="1"/>
+										<circle cx="9" cy="19" r="1"/>
+										<circle cx="15" cy="12" r="1"/>
+										<circle cx="15" cy="5" r="1"/>
+										<circle cx="15" cy="19" r="1"/>
+									</svg>
 								</div>
 							</div>
 						{/each}
@@ -618,23 +819,33 @@
 			
 			<div class="modal-footer">
 				<div class="footer-info">
-					<span class="hint" role="note">
-						<span aria-hidden="true">💡</span> 
-						Drag bookmarks to reorder or create folders
-					</span>
+					<div class="keyboard-hints">
+						<span class="hint-item">
+							<kbd>↑↓</kbd> Navigate
+						</span>
+						<span class="hint-item">
+							<kbd>Enter</kbd> Open
+						</span>
+						<span class="hint-item">
+							<kbd>Ctrl+Enter</kbd> New tab
+						</span>
+						<span class="hint-item">
+							<kbd>Esc</kbd> Close
+						</span>
+					</div>
 				</div>
 				<div class="footer-actions">
 					<button 
 						class="action-btn secondary" 
-						on:click={clearSearch}
+						onclick={clearSearch}
+						disabled={!hasSearchQuery}
 						type="button"
-						disabled={!searchQuery}
 					>
 						Clear Search
 					</button>
 					<button 
 						class="action-btn primary" 
-						on:click={closeModal}
+						onclick={closeModal}
 						type="button"
 					>
 						Done
@@ -642,299 +853,365 @@
 				</div>
 			</div>
 		</div>
+		
+		{#if dropIndicatorPosition.visible}
+			<div 
+				class="drop-indicator"
+				style:left="{dropIndicatorPosition.x}px"
+				style:top="{dropIndicatorPosition.y}px"
+				style:opacity={$dragIndicatorOpacity}
+				aria-hidden="true"
+			>
+				<div class="drop-indicator-ring"></div>
+			</div>
+		{/if}
 	</div>
 {/if}
 
 <style>
-	.sr-only {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		padding: 0;
-		margin: -1px;
-		overflow: hidden;
-		clip: rect(0, 0, 0, 0);
-		white-space: nowrap;
-		border: 0;
-	}
-
-	.modal-overlay {
+	.modal-backdrop {
 		position: fixed;
-		top: 0;
-		left: 0;
-		width: 100vw;
-		height: 100vh;
-		background: rgba(0, 0, 0, 0.7);
-		backdrop-filter: blur(8px);
+		inset: 0;
+		background: rgba(0, 0, 0, 0.6);
+		backdrop-filter: blur(12px) saturate(1.2);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		z-index: 1000;
-		padding: 20px;
+		padding: 24px;
+		animation: backdrop-enter 0.3s ease-out;
+	}
+	
+	@keyframes backdrop-enter {
+		from {
+			background: rgba(0, 0, 0, 0);
+			backdrop-filter: blur(0px);
+		}
+		to {
+			background: rgba(0, 0, 0, 0.6);
+			backdrop-filter: blur(12px) saturate(1.2);
+		}
 	}
 	
 	.bookmark-modal {
-		width: 90vw;
-		max-width: 800px;
-		height: 80vh;
+		width: 100%;
+		max-width: 900px;
+		height: 85vh;
 		max-height: 700px;
-		background: var(--modal-bg);
-		border: 2px solid var(--modal-border);
-		border-radius: 20px;
-		backdrop-filter: blur(20px);
-		box-shadow: 
-			0 25px 50px rgba(0, 0, 0, 0.5),
-			0 0 0 1px rgba(255, 255, 255, 0.1),
-			inset 0 1px 0 rgba(255, 255, 255, 0.2);
+		background: linear-gradient(135deg, 
+			rgba(255, 255, 255, 0.12) 0%, 
+			rgba(255, 255, 255, 0.08) 50%,
+			rgba(255, 255, 255, 0.06) 100%);
+		backdrop-filter: blur(24px) saturate(1.8);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		border-radius: 24px;
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
 		position: relative;
-		outline: none;
+		box-shadow: 
+			0 32px 64px rgba(0, 0, 0, 0.3),
+			0 0 0 1px rgba(var(--primary-rgb), 0.2),
+			inset 0 1px 0 rgba(255, 255, 255, 0.15);
+		animation: modal-enter 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 	
-	.bookmark-modal::before {
-		content: '';
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		background: linear-gradient(
-			135deg,
-			rgba(255, 255, 255, 0.1) 0%,
-			transparent 50%,
-			rgba(0, 0, 0, 0.1) 100%
-		);
-		pointer-events: none;
-		border-radius: inherit;
+	@keyframes modal-enter {
+		from {
+			transform: scale(0.85);
+			opacity: 0;
+		}
+		to {
+			transform: scale(1);
+			opacity: 1;
+		}
 	}
 	
 	.modal-header {
-		padding: 24px 32px 16px;
+		padding: 28px 32px 20px;
 		border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-		background: rgba(255, 255, 255, 0.05);
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 24px;
+		background: linear-gradient(135deg, 
+			rgba(255, 255, 255, 0.1) 0%, 
+			rgba(255, 255, 255, 0.05) 100%);
 		position: relative;
-		z-index: 2;
 	}
 	
-	.header-content {
+	.header-main {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 24px;
+	}
+	
+	.category-info {
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: 6px;
 	}
 	
 	.category-title {
 		margin: 0;
-		font-size: 24px;
+		font-size: 28px;
 		font-weight: 700;
-		color: var(--modal-text);
-		text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+		color: var(--text-color);
+		letter-spacing: -0.02em;
+		text-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 	}
 	
-	.bookmark-stats {
-		font-size: 12px;
-		color: rgba(255, 255, 255, 0.6);
+	.bookmark-count {
+		font-size: 14px;
+		color: rgba(255, 255, 255, 0.7);
 		font-weight: 500;
+		display: flex;
+		align-items: center;
+		gap: 6px;
 	}
 	
-	.header-controls {
+	.search-filter {
+		color: rgba(255, 255, 255, 0.5);
+		font-size: 13px;
+	}
+	
+	.header-actions {
 		display: flex;
 		align-items: center;
 		gap: 16px;
+	}
+	
+	.search-wrapper {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 6px;
 	}
 	
 	.search-container {
 		position: relative;
 		display: flex;
 		align-items: center;
-		background: rgba(255, 255, 255, 0.1);
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		border-radius: 20px;
-		padding: 8px 16px;
-		transition: all 0.3s ease;
-		min-width: 200px;
+		background: rgba(255, 255, 255, 0.08);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		border-radius: 18px;
+		padding: 12px 16px;
+		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+		min-width: 280px;
+		overflow: hidden;
 	}
 	
-	.search-container.active {
-		background: rgba(255, 255, 255, 0.15);
-		border-color: var(--modal-accent);
-		box-shadow: 0 0 0 2px rgba(var(--modal-accent), 0.2);
+	.search-container.focused {
+		background: rgba(255, 255, 255, 0.12);
+		border-color: rgba(var(--primary-rgb), 0.4);
+		box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.15);
+		transform: scale(1.02);
+	}
+	
+	.search-container.has-query {
+		border-color: rgba(var(--primary-rgb), 0.3);
 	}
 	
 	.search-icon {
-		margin-right: 8px;
-		font-size: 14px;
-		opacity: 0.7;
+		color: rgba(255, 255, 255, 0.5);
+		margin-right: 12px;
+		transition: color 0.3s ease;
+	}
+	
+	.search-container.focused .search-icon {
+		color: rgba(var(--primary-rgb), 0.8);
 	}
 	
 	.search-input {
 		background: none;
 		border: none;
 		outline: none;
-		color: var(--modal-text);
+		color: var(--text-color);
 		font-size: 14px;
 		width: 100%;
 		min-width: 0;
+		font-weight: 400;
 	}
 	
 	.search-input::placeholder {
-		color: rgba(255, 255, 255, 0.5);
+		color: rgba(255, 255, 255, 0.4);
+		transition: color 0.3s ease;
 	}
 	
-	.clear-search {
-		background: none;
+	.search-container.focused .search-input::placeholder {
+		color: rgba(255, 255, 255, 0.6);
+	}
+	
+	.clear-search-btn {
+		background: rgba(255, 255, 255, 0.08);
 		border: none;
 		color: rgba(255, 255, 255, 0.6);
 		cursor: pointer;
-		font-size: 18px;
-		line-height: 1;
+		border-radius: 8px;
 		margin-left: 8px;
-		padding: 2px 4px;
-		border-radius: 4px;
+		padding: 6px;
+		transition: all 0.2s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+	}
+	
+	.clear-search-btn:hover {
+		background: rgba(255, 255, 255, 0.15);
+		color: rgba(255, 255, 255, 0.9);
+		transform: scale(1.05);
+	}
+	
+	.search-glow-effect {
+		position: absolute;
+		inset: -2px;
+		background: linear-gradient(135deg, 
+			rgba(var(--primary-rgb), calc(var(--search-glow) * 0.4)) 0%,
+			rgba(var(--primary-rgb), calc(var(--search-glow) * 0.1)) 50%,
+			transparent 100%);
+		border-radius: 20px;
+		pointer-events: none;
+		z-index: -1;
 		transition: all 0.3s ease;
 	}
 	
-	.clear-search:hover {
-		background: rgba(255, 255, 255, 0.1);
-		color: white;
+	.search-shortcut-hint {
+		font-size: 11px;
+		color: rgba(255, 255, 255, 0.4);
+		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+		background: rgba(255, 255, 255, 0.06);
+		padding: 4px 8px;
+		border-radius: 6px;
+		opacity: 0;
+		transition: opacity 0.3s ease;
+		pointer-events: none;
 	}
 	
-	.clear-search:focus {
-		outline: 2px solid var(--modal-accent);
-		outline-offset: 2px;
+	.search-wrapper:hover .search-shortcut-hint {
+		opacity: 1;
 	}
 	
-	.view-controls {
-		display: flex;
-		gap: 8px;
-	}
-	
-	.toggle-labels {
-		background: rgba(255, 255, 255, 0.1);
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		border-radius: 8px;
+	.toggle-labels-btn {
+		background: rgba(255, 255, 255, 0.08);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		border-radius: 12px;
 		color: rgba(255, 255, 255, 0.7);
 		cursor: pointer;
-		font-size: 16px;
-		padding: 8px;
-		transition: all 0.3s ease;
+		padding: 12px;
+		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 	}
 	
-	.toggle-labels:hover {
-		background: rgba(255, 255, 255, 0.15);
-		color: white;
+	.toggle-labels-btn:hover {
+		background: rgba(255, 255, 255, 0.12);
+		color: rgba(255, 255, 255, 0.9);
+		transform: translateY(-2px);
+		border-color: rgba(255, 255, 255, 0.25);
 	}
 	
-	.toggle-labels:focus {
-		outline: 2px solid var(--modal-accent);
+	.toggle-labels-btn.active {
+		background: rgba(var(--primary-rgb), 0.2);
+		color: rgba(var(--primary-rgb), 0.9);
+		border-color: rgba(var(--primary-rgb), 0.3);
+		box-shadow: 0 0 12px rgba(var(--primary-rgb), 0.2);
+	}
+	
+	.toggle-labels-btn:focus-visible {
+		outline: 2px solid rgba(var(--primary-rgb), 0.6);
 		outline-offset: 2px;
 	}
 	
-	.toggle-labels.active {
-		background: var(--modal-accent);
-		color: white;
-		border-color: var(--modal-accent);
-	}
-	
-	.close-button {
-		background: rgba(255, 255, 255, 0.1);
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		border-radius: 8px;
+	.close-btn {
+		background: rgba(255, 255, 255, 0.08);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		border-radius: 12px;
 		color: rgba(255, 255, 255, 0.7);
 		cursor: pointer;
-		font-size: 20px;
-		line-height: 1;
-		padding: 8px;
-		transition: all 0.3s ease;
+		padding: 12px;
+		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 40px;
-		height: 40px;
 	}
 	
-	.close-button:hover {
-		background: rgba(255, 255, 255, 0.15);
-		color: white;
+	.close-btn:hover {
+		background: rgba(239, 68, 68, 0.15);
+		color: rgba(239, 68, 68, 0.9);
+		border-color: rgba(239, 68, 68, 0.3);
+		transform: translateY(-2px);
 	}
 	
-	.close-button:focus {
-		outline: 2px solid var(--modal-accent);
+	.close-btn:focus-visible {
+		outline: 2px solid rgba(var(--primary-rgb), 0.6);
 		outline-offset: 2px;
 	}
 	
-	.modal-content {
+	.modal-body {
 		flex: 1;
 		overflow: hidden;
 		position: relative;
-		z-index: 1;
 	}
 	
-	.empty-bookmarks {
+	.empty-state {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
 		height: 100%;
-		color: rgba(255, 255, 255, 0.6);
 		text-align: center;
-		padding: 40px;
+		padding: 48px 32px;
+		color: rgba(255, 255, 255, 0.6);
 	}
 	
 	.empty-icon {
-		font-size: 48px;
-		margin-bottom: 16px;
-		opacity: 0.7;
+		color: rgba(255, 255, 255, 0.3);
+		margin-bottom: 20px;
+		opacity: 0.8;
 	}
 	
-	.empty-bookmarks h3 {
-		margin: 0 0 8px 0;
-		font-size: 18px;
+	.empty-icon.search-empty {
+		color: rgba(var(--primary-rgb), 0.4);
+	}
+	
+	.empty-state h3 {
+		margin: 0 0 12px 0;
+		font-size: 20px;
+		font-weight: 600;
 		color: rgba(255, 255, 255, 0.8);
 	}
 	
-	.empty-bookmarks p {
-		margin: 0 0 20px 0;
+	.empty-state p {
+		margin: 0;
 		font-size: 14px;
+		line-height: 1.5;
+		color: rgba(255, 255, 255, 0.6);
 	}
 	
-	.clear-search-btn {
-		background: var(--modal-accent);
+	.link-btn {
+		background: none;
 		border: none;
-		border-radius: 8px;
-		color: white;
+		color: rgba(var(--primary-rgb), 0.8);
 		cursor: pointer;
-		font-size: 14px;
-		padding: 8px 16px;
-		transition: all 0.3s ease;
+		text-decoration: underline;
+		font-size: inherit;
+		padding: 0;
 	}
 	
-	.clear-search-btn:hover {
-		opacity: 0.9;
-		transform: translateY(-1px);
-	}
-	
-	.clear-search-btn:focus {
-		outline: 2px solid rgba(255, 255, 255, 0.8);
-		outline-offset: 2px;
+	.link-btn:hover {
+		color: rgba(var(--primary-rgb), 1);
 	}
 	
 	.bookmarks-grid {
-		padding: 24px;
+		padding: 28px;
 		height: 100%;
 		overflow-y: auto;
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-		gap: 16px;
+		grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+		gap: 20px;
 		align-content: start;
+		scrollbar-width: thin;
+		scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 	}
 	
 	.bookmarks-grid.dragging {
@@ -942,65 +1219,101 @@
 	}
 	
 	.bookmark-item {
-		background: rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.06);
 		border: 2px solid rgba(255, 255, 255, 0.1);
-		border-radius: 16px;
+		border-radius: 20px;
 		cursor: pointer;
+		position: relative;
+		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+		min-height: 140px;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+		backdrop-filter: blur(8px);
+	}
+	
+	.bookmark-item::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(135deg, 
+			rgba(255, 255, 255, 0.1) 0%, 
+			transparent 50%,
+			rgba(0, 0, 0, 0.05) 100%);
+		opacity: 0;
+		transition: opacity 0.3s ease;
+		border-radius: inherit;
+	}
+	
+	.bookmark-item:hover {
+		background: rgba(255, 255, 255, 0.1);
+		border-color: rgba(255, 255, 255, 0.2);
+		transform: translateY(-4px) scale(1.02);
+		box-shadow: 
+			0 12px 32px rgba(0, 0, 0, 0.2),
+			0 0 0 1px rgba(var(--primary-rgb), 0.3);
+	}
+	
+	.bookmark-item:hover::before {
+		opacity: 1;
+	}
+	
+	.bookmark-item.selected {
+		border-color: rgba(var(--primary-rgb), 0.6);
+		box-shadow: 
+			0 8px 24px rgba(0, 0, 0, 0.15),
+			0 0 0 2px rgba(var(--primary-rgb), 0.4);
+		transform: translateY(-2px);
+	}
+	
+	.bookmark-item:focus-visible {
+		outline: none;
+		border-color: rgba(var(--primary-rgb), 0.6);
+		box-shadow: 
+			0 8px 24px rgba(0, 0, 0, 0.15),
+			0 0 0 2px rgba(var(--primary-rgb), 0.4);
+	}
+	
+	.bookmark-item.is-dragging {
+		opacity: 0.7;
+		transform: rotate(3deg) scale(1.05);
+		z-index: 1000;
+		box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+	}
+	
+	.bookmark-item.drop-target {
+		background: rgba(var(--primary-rgb), 0.15);
+		border-color: rgba(var(--primary-rgb), 0.5);
+		animation: drop-target-pulse 1s infinite;
+	}
+	
+	.bookmark-item.folder-creation-hint {
+		background: rgba(255, 193, 7, 0.15);
+		border-color: rgba(255, 193, 7, 0.5);
+		animation: folder-hint-bounce 0.6s ease-in-out;
+	}
+	
+	.bookmark-content {
+		padding: 20px;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		padding: 16px 12px;
-		position: relative;
-		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-		min-height: 120px;
-		overflow: hidden;
-	}
-	
-	.bookmark-item:hover {
-		background: rgba(255, 255, 255, 0.12);
-		border-color: rgba(255, 255, 255, 0.3);
-		transform: translateY(-2px);
-		box-shadow: 
-			0 8px 25px rgba(0, 0, 0, 0.3),
-			0 0 0 1px var(--modal-accent);
-	}
-	
-	.bookmark-item:focus {
-		outline: 2px solid var(--modal-accent);
-		outline-offset: 2px;
-		background: rgba(255, 255, 255, 0.12);
-	}
-	
-	.bookmark-item.dragging {
-		opacity: 0.7;
-		transform: rotate(5deg) scale(1.05);
-		z-index: 1000;
-		box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-	}
-	
-	.bookmark-item.drop-target {
-		background: rgba(var(--modal-accent), 0.2);
-		border-color: var(--modal-accent);
-		animation: pulse 1s infinite;
-	}
-	
-	.bookmark-item.folder-drop-target {
-		background: rgba(255, 193, 7, 0.2);
-		border-color: #ffc107;
-		animation: folderPulse 0.5s ease-in-out;
+		flex: 1;
+		text-align: center;
+		gap: 12px;
 	}
 	
 	.bookmark-favicon {
-		width: 48px;
-		height: 48px;
-		border-radius: 8px;
+		width: 56px;
+		height: 56px;
+		border-radius: 12px;
 		overflow: hidden;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: rgba(255, 255, 255, 0.1);
-		margin-bottom: 8px;
+		background: rgba(255, 255, 255, 0.08);
+		position: relative;
 		transition: transform 0.3s ease;
 	}
 	
@@ -1009,64 +1322,140 @@
 	}
 	
 	.favicon-image {
-		width: 32px;
-		height: 32px;
+		width: 36px;
+		height: 36px;
 		object-fit: contain;
-		filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+		filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.3));
+		transition: filter 0.3s ease;
+	}
+	
+	.bookmark-item:hover .favicon-image {
+		filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.4));
 	}
 	
 	.favicon-fallback {
-		width: 32px;
-		height: 32px;
+		width: 36px;
+		height: 36px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: linear-gradient(135deg, var(--modal-accent), #667eea);
+		background: linear-gradient(135deg, 
+			rgba(var(--primary-rgb), 0.8) 0%, 
+			rgba(var(--primary-rgb), 0.6) 100%);
 		color: white;
-		font-weight: bold;
-		font-size: 16px;
-		border-radius: 4px;
+		font-weight: 700;
+		font-size: 18px;
+		border-radius: 8px;
+		text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+	}
+	
+	.favicon-glow {
+		position: absolute;
+		inset: -4px;
+		background: radial-gradient(circle at center, 
+			rgba(var(--primary-rgb), 0.2) 0%,
+			transparent 70%);
+		border-radius: 16px;
+		opacity: 0;
+		transition: opacity 0.3s ease;
+		pointer-events: none;
+	}
+	
+	.bookmark-item:hover .favicon-glow {
+		opacity: 1;
 	}
 	
 	.bookmark-label {
-		text-align: center;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
 		width: 100%;
+		min-width: 0;
 	}
 	
 	.bookmark-title {
-		display: block;
-		font-size: 11px;
+		font-size: 12px;
 		font-weight: 600;
-		color: var(--modal-text);
-		line-height: 1.2;
-		margin-bottom: 2px;
+		color: var(--text-color);
+		line-height: 1.3;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		white-space: nowrap;
-		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 	}
 	
 	.bookmark-description {
-		display: block;
-		font-size: 9px;
+		font-size: 10px;
 		color: rgba(255, 255, 255, 0.6);
-		line-height: 1.1;
+		line-height: 1.2;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		white-space: nowrap;
+		display: -webkit-box;
+		-webkit-line-clamp: 1;
+		-webkit-box-orient: vertical;
+	}
+	
+	.bookmark-hover-overlay {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		background: rgba(0, 0, 0, 0.4);
+		backdrop-filter: blur(4px);
+		border-radius: inherit;
+		opacity: 0;
+		transition: opacity 0.3s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+	}
+	
+	.bookmark-item:hover .bookmark-hover-overlay {
+		opacity: 1;
+		pointer-events: auto;
+	}
+	
+	.quick-actions {
+		display: flex;
+		gap: 8px;
+	}
+	
+	.quick-action-btn {
+		background: rgba(255, 255, 255, 0.15);
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		border-radius: 8px;
+		color: rgba(255, 255, 255, 0.9);
+		cursor: pointer;
+		padding: 8px;
+		transition: all 0.2s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		backdrop-filter: blur(8px);
+	}
+	
+	.quick-action-btn:hover {
+		background: rgba(255, 255, 255, 0.25);
+		border-color: rgba(255, 255, 255, 0.4);
+		transform: scale(1.05);
 	}
 	
 	.drag-handle {
 		position: absolute;
-		top: 4px;
-		right: 4px;
-		font-size: 12px;
-		color: rgba(255, 255, 255, 0.4);
+		top: 8px;
+		right: 8px;
+		color: rgba(255, 255, 255, 0.3);
 		opacity: 0;
-		transition: opacity 0.3s ease;
+		transition: all 0.3s ease;
 		cursor: grab;
-		transform: rotate(90deg);
-		pointer-events: none;
+		padding: 4px;
+		border-radius: 4px;
+		background: rgba(255, 255, 255, 0.1);
+		backdrop-filter: blur(4px);
 	}
 	
 	.bookmark-item:hover .drag-handle {
@@ -1078,27 +1467,46 @@
 	}
 	
 	.modal-footer {
-		padding: 16px 24px;
-		border-top: 1px solid rgba(255, 255, 255, 0.1);
-		background: rgba(255, 255, 255, 0.05);
+		padding: 20px 28px;
+		border-top: 1px solid rgba(255, 255, 255, 0.08);
+		background: linear-gradient(135deg, 
+			rgba(255, 255, 255, 0.06) 0%, 
+			rgba(255, 255, 255, 0.03) 100%);
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		position: relative;
-		z-index: 2;
+		gap: 20px;
 	}
 	
 	.footer-info {
 		flex: 1;
 	}
 	
-	.hint {
-		font-size: 12px;
-		color: rgba(255, 255, 255, 0.5);
-		font-style: italic;
+	.keyboard-hints {
+		display: flex;
+		gap: 16px;
+		flex-wrap: wrap;
+	}
+	
+	.hint-item {
 		display: flex;
 		align-items: center;
 		gap: 6px;
+		font-size: 12px;
+		color: rgba(255, 255, 255, 0.5);
+	}
+	
+	kbd {
+		background: rgba(255, 255, 255, 0.1);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		border-radius: 4px;
+		padding: 2px 6px;
+		font-size: 10px;
+		font-weight: 600;
+		color: rgba(255, 255, 255, 0.7);
+		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+		letter-spacing: 0.5px;
+		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 	}
 	
 	.footer-actions {
@@ -1107,72 +1515,118 @@
 	}
 	
 	.action-btn {
-		padding: 8px 16px;
-		border-radius: 8px;
+		padding: 10px 18px;
+		border-radius: 12px;
 		font-size: 14px;
 		font-weight: 500;
 		cursor: pointer;
-		transition: all 0.3s ease;
+		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 		border: 1px solid transparent;
+		display: flex;
+		align-items: center;
+		gap: 8px;
 	}
 	
-	.action-btn:focus {
-		outline: 2px solid var(--modal-accent);
+	.action-btn:focus-visible {
+		outline: 2px solid rgba(var(--primary-rgb), 0.6);
 		outline-offset: 2px;
 	}
 	
 	.action-btn:disabled {
-		opacity: 0.5;
+		opacity: 0.4;
 		cursor: not-allowed;
+		transform: none;
 	}
 	
 	.action-btn.secondary {
-		background: rgba(255, 255, 255, 0.1);
-		border-color: rgba(255, 255, 255, 0.2);
+		background: rgba(255, 255, 255, 0.08);
+		border-color: rgba(255, 255, 255, 0.15);
 		color: rgba(255, 255, 255, 0.8);
 	}
 	
 	.action-btn.secondary:hover:not(:disabled) {
-		background: rgba(255, 255, 255, 0.15);
-		color: white;
+		background: rgba(255, 255, 255, 0.12);
+		color: rgba(255, 255, 255, 0.95);
+		transform: translateY(-2px);
+		border-color: rgba(255, 255, 255, 0.25);
 	}
 	
 	.action-btn.primary {
-		background: var(--modal-accent);
+		background: linear-gradient(135deg, 
+			rgba(var(--primary-rgb), 0.8) 0%, 
+			rgba(var(--primary-rgb), 0.6) 100%);
 		color: white;
+		border-color: rgba(var(--primary-rgb), 0.3);
+		box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.2);
 	}
 	
 	.action-btn.primary:hover {
-		opacity: 0.9;
-		transform: translateY(-1px);
+		transform: translateY(-2px);
+		box-shadow: 0 8px 20px rgba(var(--primary-rgb), 0.3);
 	}
 	
-	@keyframes pulse {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.7; }
+	.drop-indicator {
+		position: fixed;
+		pointer-events: none;
+		z-index: 1001;
+		transform: translate(-50%, -50%);
 	}
 	
-	@keyframes folderPulse {
-		0% { transform: scale(1); }
+	.drop-indicator-ring {
+		width: 40px;
+		height: 40px;
+		border: 3px solid rgba(var(--primary-rgb), 0.8);
+		border-radius: 50%;
+		background: rgba(var(--primary-rgb), 0.2);
+		backdrop-filter: blur(4px);
+		animation: drop-indicator-pulse 1s infinite;
+	}
+	
+	@keyframes drop-target-pulse {
+		0%, 100% { 
+			background: rgba(var(--primary-rgb), 0.15);
+			border-color: rgba(var(--primary-rgb), 0.5);
+		}
+		50% { 
+			background: rgba(var(--primary-rgb), 0.25);
+			border-color: rgba(var(--primary-rgb), 0.7);
+		}
+	}
+	
+	@keyframes folder-hint-bounce {
+		0%, 100% { transform: scale(1); }
 		50% { transform: scale(1.05); }
-		100% { transform: scale(1); }
 	}
-
-	@media (max-width: 768px) {
+	
+	@keyframes drop-indicator-pulse {
+		0%, 100% { 
+			transform: scale(1);
+			opacity: 1;
+		}
+		50% { 
+			transform: scale(1.2);
+			opacity: 0.7;
+		}
+	}
+	
+	@media (max-width: 1024px) {
 		.bookmark-modal {
 			width: 95vw;
 			height: 90vh;
-			margin: 0;
+			margin: 12px;
 		}
 		
 		.modal-header {
-			padding: 16px 20px 12px;
-			flex-direction: column;
-			gap: 16px;
+			padding: 24px 24px 16px;
 		}
 		
-		.header-controls {
-			width: 100%;
+		.header-main {
+			flex-direction: column;
+			gap: 20px;
+			align-items: stretch;
+		}
+		
+		.header-actions {
 			justify-content: space-between;
 		}
 		
@@ -1182,20 +1636,70 @@
 		}
 		
 		.bookmarks-grid {
-			padding: 16px;
+			grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+			gap: 16px;
+			padding: 20px;
+		}
+		
+		.bookmark-item {
+			min-height: 120px;
+		}
+		
+		.keyboard-hints {
+			display: none;
+		}
+	}
+	
+	@media (max-width: 640px) {
+		.bookmark-modal {
+			width: 98vw;
+			height: 95vh;
+			margin: 8px;
+			border-radius: 20px;
+		}
+		
+		.modal-header {
+			padding: 20px 20px 16px;
+		}
+		
+		.category-title {
+			font-size: 24px;
+		}
+		
+		.search-container {
+			min-width: 200px;
+		}
+		
+		.bookmarks-grid {
 			grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
 			gap: 12px;
+			padding: 16px;
 		}
 		
 		.bookmark-item {
 			min-height: 100px;
-			padding: 12px 8px;
+		}
+		
+		.bookmark-content {
+			padding: 16px 12px;
+			gap: 8px;
+		}
+		
+		.bookmark-favicon {
+			width: 48px;
+			height: 48px;
+		}
+		
+		.favicon-image,
+		.favicon-fallback {
+			width: 28px;
+			height: 28px;
 		}
 		
 		.modal-footer {
-			padding: 12px 16px;
-			flex-direction: column;
-			gap: 12px;
+			padding: 16px 20px;
+			flex-direction: column-reverse;
+			gap: 16px;
 		}
 		
 		.footer-actions {
@@ -1205,6 +1709,37 @@
 		
 		.action-btn {
 			flex: 1;
+		}
+	}
+	
+	@media (prefers-reduced-motion: reduce) {
+		.bookmark-modal,
+		.bookmark-item,
+		.search-container {
+			animation: none;
+			transition: none;
+		}
+		
+		.bookmark-item:hover {
+			transform: none;
+		}
+		
+		.drop-indicator-ring {
+			animation: none;
+		}
+	}
+	
+	@media (hover: none) {
+		.bookmark-item:hover {
+			transform: none;
+		}
+		
+		.bookmark-hover-overlay {
+			display: none;
+		}
+		
+		.drag-handle {
+			opacity: 1;
 		}
 	}
 </style>

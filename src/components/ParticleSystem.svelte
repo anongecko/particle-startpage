@@ -37,6 +37,7 @@
 	let isMobile = $state(false);
 	let performanceMonitor: PerformanceMonitor = $state();
 	let resizeObserver: ResizeObserver | null = $state();
+	let isVisible = $state(true);
 	
 	const dispatch = createEventDispatcher();
 	
@@ -53,13 +54,15 @@
 		isActive: boolean;
 		lifetime: number;
 		maxLifetime: number;
-		behavior: {
-			cohesionRadius: number;
-			separationRadius: number;
-			alignmentRadius: number;
-			maxSpeed: number;
-			maxForce: number;
-		};
+		behavior: ParticleBehavior;
+	}
+	
+	interface ParticleBehavior {
+		cohesionRadius: number;
+		separationRadius: number;
+		alignmentRadius: number;
+		maxSpeed: number;
+		maxForce: number;
 	}
 	
 	interface MouseState {
@@ -97,16 +100,17 @@
 		out float v_opacity;
 		out vec3 v_color;
 		out float v_glow;
+		out vec2 v_position;
 		
 		void main() {
 			vec2 position = (a_position / u_resolution) * 2.0 - 1.0;
 			position.y = -position.y;
 			
-			float breathing = sin(u_time * 2.0 + a_phase) * 0.1 + 1.0;
+			float breathing = sin(u_time * 1.5 + a_phase) * 0.15 + 1.0;
 			float currentSize = a_size * breathing * u_dpr;
 			
 			if (!u_isVisible) {
-				currentSize *= 0.7;
+				currentSize *= 0.6;
 			}
 			
 			gl_Position = vec4(position, 0.0, 1.0);
@@ -115,6 +119,7 @@
 			v_opacity = a_opacity * u_globalOpacity;
 			v_color = a_color;
 			v_glow = breathing;
+			v_position = gl_PointCoord;
 		}
 	`;
 	
@@ -124,6 +129,7 @@
 		in float v_opacity;
 		in vec3 v_color;
 		in float v_glow;
+		in vec2 v_position;
 		
 		out vec4 fragColor;
 		
@@ -133,23 +139,23 @@
 			
 			if (distance > 0.5) discard;
 			
-			float alpha = 1.0 - smoothstep(0.2, 0.5, distance);
-			float glow = 1.0 - smoothstep(0.0, 0.6, distance);
+			float alpha = 1.0 - smoothstep(0.1, 0.5, distance);
+			float coreGlow = 1.0 - smoothstep(0.0, 0.3, distance);
+			float outerGlow = 1.0 - smoothstep(0.3, 0.6, distance);
 			
-			vec3 finalColor = mix(v_color, v_color + vec3(0.2), v_glow * glow * 0.5);
+			vec3 coreColor = v_color + vec3(0.3) * coreGlow;
+			vec3 finalColor = mix(v_color, coreColor, v_glow * 0.7);
 			
-			fragColor = vec4(finalColor, alpha * v_opacity);
+			float finalAlpha = alpha * v_opacity * (0.8 + outerGlow * 0.2);
+			
+			fragColor = vec4(finalColor, finalAlpha);
 		}
 	`;
 	
 	class ParticleNexusSystem {
 		private particles: Particle[] = [];
 		private program: WebGLProgram | null = null;
-		private positionBuffer: WebGLBuffer | null = null;
-		private sizeBuffer: WebGLBuffer | null = null;
-		private opacityBuffer: WebGLBuffer | null = null;
-		private colorBuffer: WebGLBuffer | null = null;
-		private phaseBuffer: WebGLBuffer | null = null;
+		private buffers: Map<string, WebGLBuffer> = new Map();
 		private vao: WebGLVertexArrayObject | null = null;
 		private uniformLocations: Map<string, WebGLUniformLocation> = new Map();
 		
@@ -166,7 +172,10 @@
 		
 		private currentColor: [number, number, number] = [0.29, 0.56, 0.89];
 		private targetColor: [number, number, number] = [0.29, 0.56, 0.89];
-		private colorTransitionSpeed = 0.02;
+		private colorTransitionSpeed = 0.03;
+		
+		private spatialGrid: Map<string, Particle[]> = new Map();
+		private gridSize = 100;
 		
 		constructor(private gl: WebGL2RenderingContext, private canvasElement: HTMLCanvasElement) {
 			this.initialize();
@@ -233,15 +242,11 @@
 			
 			this.gl.bindVertexArrayObject(this.vao);
 			
-			this.positionBuffer = this.gl.createBuffer();
-			this.sizeBuffer = this.gl.createBuffer();
-			this.opacityBuffer = this.gl.createBuffer();
-			this.colorBuffer = this.gl.createBuffer();
-			this.phaseBuffer = this.gl.createBuffer();
-			
-			if (!this.positionBuffer || !this.sizeBuffer || !this.opacityBuffer || 
-				!this.colorBuffer || !this.phaseBuffer) {
-				throw new Error('Failed to create buffers');
+			const bufferNames = ['position', 'size', 'opacity', 'color', 'phase'];
+			for (const name of bufferNames) {
+				const buffer = this.gl.createBuffer();
+				if (!buffer) throw new Error(`Failed to create ${name} buffer`);
+				this.buffers.set(name, buffer);
 			}
 		}
 		
@@ -260,72 +265,119 @@
 		
 		private createParticles(): void {
 			this.particles = [];
+			const adjustedCount = isMobile ? Math.min(count, 50) : count;
 			
-			for (let i = 0; i < count; i++) {
+			for (let i = 0; i < adjustedCount; i++) {
 				this.particles.push(this.createParticle());
 			}
 		}
 		
 		private createParticle(): Particle {
-			const baseSize = performanceMode === 'high' ? 6 : performanceMode === 'medium' ? 4 : 3;
+			const sizeMultiplier = {
+				high: 1.2,
+				medium: 1.0,
+				low: 0.8
+			}[performanceMode];
+			
+			const baseSize = (isMobile ? 4 : 6) * sizeMultiplier;
 			
 			return {
 				x: Math.random() * this.canvasElement.width,
 				y: Math.random() * this.canvasElement.height,
-				vx: (Math.random() - 0.5) * 2 * speed,
-				vy: (Math.random() - 0.5) * 2 * speed,
-				size: baseSize + Math.random() * 4,
-				opacity: 0.1 + Math.random() * 0.7,
+				vx: (Math.random() - 0.5) * 1.5 * speed,
+				vy: (Math.random() - 0.5) * 1.5 * speed,
+				size: baseSize + Math.random() * 3,
+				opacity: 0.2 + Math.random() * 0.6,
 				color: [...this.currentColor] as [number, number, number],
 				phase: Math.random() * Math.PI * 2,
-				originalSize: baseSize + Math.random() * 4,
+				originalSize: baseSize + Math.random() * 3,
 				isActive: true,
 				lifetime: 0,
-				maxLifetime: 5000 + Math.random() * 10000,
+				maxLifetime: 8000 + Math.random() * 12000,
 				behavior: {
-					cohesionRadius: 80,
-					separationRadius: 25,
-					alignmentRadius: 50,
-					maxSpeed: 2 * speed,
-					maxForce: 0.05
+					cohesionRadius: isMobile ? 60 : 80,
+					separationRadius: isMobile ? 20 : 25,
+					alignmentRadius: isMobile ? 40 : 50,
+					maxSpeed: (isMobile ? 1.5 : 2) * speed,
+					maxForce: 0.04
 				}
 			};
+		}
+		
+		private updateSpatialGrid(): void {
+			if (performanceMode === 'low') return;
+			
+			this.spatialGrid.clear();
+			
+			for (const particle of this.particles) {
+				const gridX = Math.floor(particle.x / this.gridSize);
+				const gridY = Math.floor(particle.y / this.gridSize);
+				const key = `${gridX},${gridY}`;
+				
+				if (!this.spatialGrid.has(key)) {
+					this.spatialGrid.set(key, []);
+				}
+				this.spatialGrid.get(key)!.push(particle);
+			}
+		}
+		
+		private getNeighbors(particle: Particle, radius: number): Particle[] {
+			if (performanceMode === 'low') {
+				return this.particles.filter(p => 
+					p !== particle && this.distance(particle, p) < radius
+				);
+			}
+			
+			const gridX = Math.floor(particle.x / this.gridSize);
+			const gridY = Math.floor(particle.y / this.gridSize);
+			const neighbors: Particle[] = [];
+			
+			for (let dx = -1; dx <= 1; dx++) {
+				for (let dy = -1; dy <= 1; dy++) {
+					const key = `${gridX + dx},${gridY + dy}`;
+					const gridParticles = this.spatialGrid.get(key);
+					if (gridParticles) {
+						neighbors.push(...gridParticles.filter(p => 
+							p !== particle && this.distance(particle, p) < radius
+						));
+					}
+				}
+			}
+			
+			return neighbors;
 		}
 		
 		update(deltaTime: number): void {
 			if (!enabled) return;
 			
-			// Update color transition
 			this.updateColorTransition();
+			this.updateSpatialGrid();
 			
-			// Update particles
+			const timeBasedOpacity = Math.min(1, (Date.now() - lastInteractionTime) / 2000);
+			
 			for (let i = this.particles.length - 1; i >= 0; i--) {
 				const particle = this.particles[i];
 				
 				particle.lifetime += deltaTime;
 				
-				// Respawn particle if lifetime exceeded
 				if (particle.lifetime > particle.maxLifetime) {
 					this.particles[i] = this.createParticle();
 					continue;
 				}
 				
-				// Apply behaviors based on performance mode
 				if (performanceMode === 'high') {
-					this.applyBehaviors(particle);
+					this.applyAdvancedBehaviors(particle);
 				} else {
-					this.applySimpleBehaviors(particle);
+					this.applyBasicBehaviors(particle);
 				}
 				
-				// Update position
 				particle.x += particle.vx;
 				particle.y += particle.vy;
 				
-				// Boundary wrapping
 				this.wrapBoundaries(particle);
 				
-				// Update phase for animation
-				particle.phase += 0.02;
+				particle.phase += 0.015;
+				particle.opacity = Math.max(0.1, particle.opacity * 0.999 + 0.001 * timeBasedOpacity);
 			}
 		}
 		
@@ -336,43 +388,61 @@
 					this.currentColor[i] += diff * this.colorTransitionSpeed;
 				}
 			}
+			
+			for (const particle of this.particles) {
+				for (let i = 0; i < 3; i++) {
+					particle.color[i] = this.currentColor[i];
+				}
+			}
 		}
 		
-		private applyBehaviors(particle: Particle): void {
-			// Mouse/touch influence
+		private applyAdvancedBehaviors(particle: Particle): void {
 			const mouseForce = this.mouseInfluence(particle);
 			const touchForce = this.touchInfluence(particle);
 			
-			// Flocking behaviors (expensive)
-			const cohesion = this.cohesion(particle);
-			const separation = this.separation(particle);
-			const alignment = this.alignment(particle);
+			const neighbors = this.getNeighbors(particle, Math.max(
+				particle.behavior.cohesionRadius,
+				particle.behavior.separationRadius,
+				particle.behavior.alignmentRadius
+			));
 			
-			// Apply forces
-			particle.vx += (mouseForce.x + touchForce.x + cohesion.x * 0.3 + separation.x * 0.8 + alignment.x * 0.2) * 0.1;
-			particle.vy += (mouseForce.y + touchForce.y + cohesion.y * 0.3 + separation.y * 0.8 + alignment.y * 0.2) * 0.1;
+			const cohesion = this.cohesion(particle, neighbors);
+			const separation = this.separation(particle, neighbors);
+			const alignment = this.alignment(particle, neighbors);
 			
-			// Limit velocity
+			const totalForceX = mouseForce.x + touchForce.x + 
+				cohesion.x * 0.2 + separation.x * 0.9 + alignment.x * 0.15;
+			const totalForceY = mouseForce.y + touchForce.y + 
+				cohesion.y * 0.2 + separation.y * 0.9 + alignment.y * 0.15;
+			
+			particle.vx += totalForceX * 0.08;
+			particle.vy += totalForceY * 0.08;
+			
+			this.limitVelocity(particle);
+		}
+		
+		private applyBasicBehaviors(particle: Particle): void {
+			const mouseForce = this.mouseInfluence(particle);
+			const touchForce = this.touchInfluence(particle);
+			const wander = { 
+				x: (Math.random() - 0.5) * 0.08, 
+				y: (Math.random() - 0.5) * 0.08 
+			};
+			
+			particle.vx += (mouseForce.x + touchForce.x + wander.x) * 0.1;
+			particle.vy += (mouseForce.y + touchForce.y + wander.y) * 0.1;
+			
+			const maxSpeed = particle.behavior.maxSpeed * 0.6;
+			particle.vx = Math.max(-maxSpeed, Math.min(maxSpeed, particle.vx));
+			particle.vy = Math.max(-maxSpeed, Math.min(maxSpeed, particle.vy));
+		}
+		
+		private limitVelocity(particle: Particle): void {
 			const speed = Math.sqrt(particle.vx ** 2 + particle.vy ** 2);
 			if (speed > particle.behavior.maxSpeed) {
 				particle.vx = (particle.vx / speed) * particle.behavior.maxSpeed;
 				particle.vy = (particle.vy / speed) * particle.behavior.maxSpeed;
 			}
-		}
-		
-		private applySimpleBehaviors(particle: Particle): void {
-			// Only mouse influence and basic wandering for performance
-			const mouseForce = this.mouseInfluence(particle);
-			const touchForce = this.touchInfluence(particle);
-			const wander = { x: (Math.random() - 0.5) * 0.1, y: (Math.random() - 0.5) * 0.1 };
-			
-			particle.vx += (mouseForce.x + touchForce.x + wander.x) * 0.1;
-			particle.vy += (mouseForce.y + touchForce.y + wander.y) * 0.1;
-			
-			// Simple velocity limiting
-			const maxSpeed = particle.behavior.maxSpeed * 0.7;
-			particle.vx = Math.max(-maxSpeed, Math.min(maxSpeed, particle.vx));
-			particle.vy = Math.max(-maxSpeed, Math.min(maxSpeed, particle.vy));
 		}
 		
 		private mouseInfluence(particle: Particle): { x: number; y: number } {
@@ -382,7 +452,7 @@
 			
 			if (distance > this.mouseState.influence || distance === 0) return { x: 0, y: 0 };
 			
-			const force = this.mouseState.isDown ? 2.0 : 0.5;
+			const force = this.mouseState.isDown ? 2.5 : 0.8;
 			const strength = (1 - distance / this.mouseState.influence) * force;
 			
 			return {
@@ -401,7 +471,7 @@
 			if (distance > this.mouseState.influence || distance === 0) return { x: 0, y: 0 };
 			
 			const touchDuration = Date.now() - this.touchState.startTime;
-			const force = Math.min(touchDuration / 500, 1.5); // Increase force over time
+			const force = Math.min(touchDuration / 400, 2.0);
 			const strength = (1 - distance / this.mouseState.influence) * force;
 			
 			return {
@@ -410,47 +480,45 @@
 			};
 		}
 		
-		private cohesion(particle: Particle): { x: number; y: number } {
-			let centerX = 0, centerY = 0, count = 0;
+		private cohesion(particle: Particle, neighbors: Particle[]): { x: number; y: number } {
+			const nearbyParticles = neighbors.filter(p => 
+				this.distance(particle, p) < particle.behavior.cohesionRadius
+			);
 			
-			for (const other of this.particles) {
-				if (other === particle) continue;
-				const distance = this.distance(particle, other);
-				if (distance < particle.behavior.cohesionRadius) {
-					centerX += other.x;
-					centerY += other.y;
-					count++;
-				}
+			if (nearbyParticles.length === 0) return { x: 0, y: 0 };
+			
+			let centerX = 0, centerY = 0;
+			for (const other of nearbyParticles) {
+				centerX += other.x;
+				centerY += other.y;
 			}
-			
-			if (count === 0) return { x: 0, y: 0 };
-			
-			centerX /= count;
-			centerY /= count;
+			centerX /= nearbyParticles.length;
+			centerY /= nearbyParticles.length;
 			
 			return this.seek(particle, centerX, centerY);
 		}
 		
-		private separation(particle: Particle): { x: number; y: number } {
-			let steerX = 0, steerY = 0, count = 0;
+		private separation(particle: Particle, neighbors: Particle[]): { x: number; y: number } {
+			const nearbyParticles = neighbors.filter(p => 
+				this.distance(particle, p) < particle.behavior.separationRadius
+			);
 			
-			for (const other of this.particles) {
-				if (other === particle) continue;
+			if (nearbyParticles.length === 0) return { x: 0, y: 0 };
+			
+			let steerX = 0, steerY = 0;
+			for (const other of nearbyParticles) {
 				const distance = this.distance(particle, other);
-				if (distance < particle.behavior.separationRadius && distance > 0) {
+				if (distance > 0) {
 					const diffX = particle.x - other.x;
 					const diffY = particle.y - other.y;
 					const normalized = Math.sqrt(diffX ** 2 + diffY ** 2);
 					steerX += (diffX / normalized) / distance;
 					steerY += (diffY / normalized) / distance;
-					count++;
 				}
 			}
 			
-			if (count === 0) return { x: 0, y: 0 };
-			
-			steerX /= count;
-			steerY /= count;
+			steerX /= nearbyParticles.length;
+			steerY /= nearbyParticles.length;
 			
 			const magnitude = Math.sqrt(steerX ** 2 + steerY ** 2);
 			if (magnitude > 0) {
@@ -461,23 +529,20 @@
 			return { x: steerX, y: steerY };
 		}
 		
-		private alignment(particle: Particle): { x: number; y: number } {
-			let velocityX = 0, velocityY = 0, count = 0;
+		private alignment(particle: Particle, neighbors: Particle[]): { x: number; y: number } {
+			const nearbyParticles = neighbors.filter(p => 
+				this.distance(particle, p) < particle.behavior.alignmentRadius
+			);
 			
-			for (const other of this.particles) {
-				if (other === particle) continue;
-				const distance = this.distance(particle, other);
-				if (distance < particle.behavior.alignmentRadius) {
-					velocityX += other.vx;
-					velocityY += other.vy;
-					count++;
-				}
+			if (nearbyParticles.length === 0) return { x: 0, y: 0 };
+			
+			let velocityX = 0, velocityY = 0;
+			for (const other of nearbyParticles) {
+				velocityX += other.vx;
+				velocityY += other.vy;
 			}
-			
-			if (count === 0) return { x: 0, y: 0 };
-			
-			velocityX /= count;
-			velocityY /= count;
+			velocityX /= nearbyParticles.length;
+			velocityY /= nearbyParticles.length;
 			
 			const magnitude = Math.sqrt(velocityX ** 2 + velocityY ** 2);
 			if (magnitude > 0) {
@@ -527,42 +592,31 @@
 			this.gl.useProgram(this.program);
 			this.gl.bindVertexArrayObject(this.vao);
 			
-			// Set uniforms
-			const resolution = this.uniformLocations.get('u_resolution');
-			if (resolution) {
-				this.gl.uniform2f(resolution, this.canvasElement.width, this.canvasElement.height);
-			}
-			
-			const timeUniform = this.uniformLocations.get('u_time');
-			if (timeUniform) {
-				this.gl.uniform1f(timeUniform, time * 0.001);
-			}
-			
-			const opacityUniform = this.uniformLocations.get('u_globalOpacity');
-			if (opacityUniform) {
-				this.gl.uniform1f(opacityUniform, opacity);
-			}
-			
-			const visibleUniform = this.uniformLocations.get('u_isVisible');
-			if (visibleUniform) {
-				this.gl.uniform1i(visibleUniform, enabled ? 1 : 0);
-			}
-			
-			const dprUniform = this.uniformLocations.get('u_dpr');
-			if (dprUniform) {
-				this.gl.uniform1f(dprUniform, window.devicePixelRatio || 1);
-			}
-			
+			this.setUniforms(time);
 			this.updateBuffers();
 			
-			// Set GL state
 			this.gl.enable(this.gl.BLEND);
 			this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
 			this.gl.clearColor(0, 0, 0, 0);
 			this.gl.clear(this.gl.COLOR_BUFFER_BIT);
 			
-			// Draw particles
 			this.gl.drawArrays(this.gl.POINTS, 0, this.particles.length);
+		}
+		
+		private setUniforms(time: number): void {
+			const uniforms = [
+				['u_resolution', () => this.gl.uniform2f(this.uniformLocations.get('u_resolution')!, this.canvasElement.width, this.canvasElement.height)],
+				['u_time', () => this.gl.uniform1f(this.uniformLocations.get('u_time')!, time * 0.001)],
+				['u_globalOpacity', () => this.gl.uniform1f(this.uniformLocations.get('u_globalOpacity')!, opacity)],
+				['u_isVisible', () => this.gl.uniform1i(this.uniformLocations.get('u_isVisible')!, isVisible ? 1 : 0)],
+				['u_dpr', () => this.gl.uniform1f(this.uniformLocations.get('u_dpr')!, window.devicePixelRatio || 1)]
+			];
+			
+			for (const [name, setter] of uniforms) {
+				if (this.uniformLocations.has(name)) {
+					(setter as () => void)();
+				}
+			}
 		}
 		
 		private updateBuffers(): void {
@@ -589,14 +643,17 @@
 				phases[i] = particle.phase;
 			}
 			
-			this.updateBuffer(this.positionBuffer!, positions, 'a_position', 2);
-			this.updateBuffer(this.sizeBuffer!, sizes, 'a_size', 1);
-			this.updateBuffer(this.opacityBuffer!, opacities, 'a_opacity', 1);
-			this.updateBuffer(this.colorBuffer!, colors, 'a_color', 3);
-			this.updateBuffer(this.phaseBuffer!, phases, 'a_phase', 1);
+			this.updateBuffer('position', positions, 'a_position', 2);
+			this.updateBuffer('size', sizes, 'a_size', 1);
+			this.updateBuffer('opacity', opacities, 'a_opacity', 1);
+			this.updateBuffer('color', colors, 'a_color', 3);
+			this.updateBuffer('phase', phases, 'a_phase', 1);
 		}
 		
-		private updateBuffer(buffer: WebGLBuffer, data: Float32Array, attributeName: string, size: number): void {
+		private updateBuffer(bufferName: string, data: Float32Array, attributeName: string, size: number): void {
+			const buffer = this.buffers.get(bufferName);
+			if (!buffer) return;
+			
 			this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer);
 			this.gl.bufferData(this.gl.ARRAY_BUFFER, data, this.gl.DYNAMIC_DRAW);
 			
@@ -646,15 +703,20 @@
 		}
 		
 		updateParticleCount(newCount: number): void {
+			const adjustedCount = isMobile ? Math.min(newCount, 50) : newCount;
 			const currentCount = this.particles.length;
 			
-			if (newCount > currentCount) {
-				for (let i = currentCount; i < newCount; i++) {
+			if (adjustedCount > currentCount) {
+				for (let i = currentCount; i < adjustedCount; i++) {
 					this.particles.push(this.createParticle());
 				}
-			} else if (newCount < currentCount) {
-				this.particles.splice(newCount);
+			} else if (adjustedCount < currentCount) {
+				this.particles.splice(adjustedCount);
 			}
+		}
+		
+		setVisibility(visible: boolean): void {
+			isVisible = visible;
 		}
 		
 		destroy(): void {
@@ -662,10 +724,9 @@
 				this.gl.deleteProgram(this.program);
 			}
 			
-			[this.positionBuffer, this.sizeBuffer, this.opacityBuffer, this.colorBuffer, this.phaseBuffer]
-				.forEach(buffer => {
-					if (buffer) this.gl.deleteBuffer(buffer);
-				});
+			for (const buffer of this.buffers.values()) {
+				this.gl.deleteBuffer(buffer);
+			}
 			
 			if (this.vao) {
 				this.gl.deleteVertexArrayObject(this.vao);
@@ -677,17 +738,15 @@
 		if (!browser) return;
 		
 		try {
-			// Initialize performance monitor
 			performanceMonitor = new PerformanceMonitor();
-			
-			// Detect device capabilities
 			isMobile = /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 			
-			// Setup canvas with proper DPI scaling
 			const context = canvas.getContext('webgl2', {
 				alpha: true,
 				antialias: !isMobile,
-				powerPreference: 'high-performance'
+				powerPreference: isMobile ? 'default' : 'high-performance',
+				preserveDrawingBuffer: false,
+				premultipliedAlpha: true
 			});
 			
 			if (!context) {
@@ -700,13 +759,10 @@
 			particleSystem = new ParticleNexusSystem(context, canvas);
 			isInitialized = true;
 			
-			// Setup resize observer
 			setupResizeObserver();
-			
-			// Start animation loop
 			startAnimationLoop();
 			
-			dispatch('initialized', { hasWebGL2, isMobile });
+			dispatch('initialized', { hasWebGL2, isMobile, particleCount: count });
 			
 		} catch (error) {
 			console.error('ParticleSystem initialization failed:', error);
@@ -737,7 +793,7 @@
 		
 		resizeObserver = new ResizeObserver(debounce(() => {
 			updateCanvasSize();
-		}, 100));
+		}, 150));
 		
 		resizeObserver.observe(canvas);
 	}
@@ -755,21 +811,24 @@
 		windowHeight = canvas.height;
 		
 		if (particleSystem) {
-			// Recreate particles with new bounds
 			particleSystem.updateParticleCount(count);
 		}
 	}
 	
 	function startAnimationLoop(): void {
 		let lastTime = 0;
+		let frameCount = 0;
 		
 		const animate = (currentTime: number) => {
-			if (!particleSystem || !isInitialized) return;
+			if (!particleSystem || !isInitialized || !enabled) {
+				animationFrame = requestAnimationFrame(animate);
+				return;
+			}
 			
 			const deltaTime = currentTime - lastTime;
 			lastTime = currentTime;
+			frameCount++;
 			
-			// Performance monitoring
 			const profileId = performanceMonitor?.startProfile('particle-frame');
 			
 			try {
@@ -783,15 +842,19 @@
 				performanceMonitor.endProfile(profileId);
 			}
 			
+			if (frameCount % 60 === 0 && performanceMonitor) {
+				const metrics = performanceMonitor.getMetrics();
+				dispatch('performance', { metrics, frameCount });
+			}
+			
 			animationFrame = requestAnimationFrame(animate);
 		};
 		
 		animationFrame = requestAnimationFrame(animate);
 	}
 	
-	// Optimized mouse handlers
 	const handleMouseMove = throttle((event: MouseEvent) => {
-		if (particleSystem && Date.now() - lastInteractionTime < 5000) {
+		if (particleSystem && (Date.now() - lastInteractionTime < 8000 || event.buttons > 0)) {
 			const rect = canvas.getBoundingClientRect();
 			const x = (event.clientX - rect.left) * (canvas.width / rect.width);
 			const y = (event.clientY - rect.top) * (canvas.height / rect.height);
@@ -817,9 +880,9 @@
 		}
 	};
 	
-	// Touch handlers for mobile
 	const handleTouchStart = (event: TouchEvent) => {
 		if (particleSystem && event.touches.length > 0) {
+			event.preventDefault();
 			const touch = event.touches[0];
 			const rect = canvas.getBoundingClientRect();
 			const x = (touch.clientX - rect.left) * (canvas.width / rect.width);
@@ -830,6 +893,7 @@
 	
 	const handleTouchMove = throttle((event: TouchEvent) => {
 		if (particleSystem && event.touches.length > 0) {
+			event.preventDefault();
 			const touch = event.touches[0];
 			const rect = canvas.getBoundingClientRect();
 			const x = (touch.clientX - rect.left) * (canvas.width / rect.width);
@@ -838,23 +902,28 @@
 		}
 	}, 16);
 	
-	const handleTouchEnd = () => {
+	const handleTouchEnd = (event: TouchEvent) => {
 		if (particleSystem) {
+			event.preventDefault();
 			particleSystem.updateTouchPosition(0, 0, false);
 		}
 	};
 	
-	// Public API
+	const handleVisibilityChange = () => {
+		isVisible = !document.hidden;
+		if (particleSystem) {
+			particleSystem.setVisibility(isVisible);
+		}
+	};
+	
 	export function getPerformanceMetrics() {
 		return performanceMonitor?.getMetrics();
 	}
 	
 	export function addEffect(x: number, y: number, type: 'burst' | 'ripple' = 'burst') {
-		// Could implement special effects here
 		dispatch('effect', { x, y, type });
 	}
 	
-	// Reactive updates
 	$effect(() => {
 		if (particleSystem && dominantColor) {
 			particleSystem.updateColor(dominantColor);
@@ -864,6 +933,13 @@
 	$effect(() => {
 		if (particleSystem && count) {
 			particleSystem.updateParticleCount(count);
+		}
+	});
+	
+	$effect(() => {
+		if (browser) {
+			document.addEventListener('visibilitychange', handleVisibilityChange);
+			return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
 		}
 	});
 </script>
@@ -882,34 +958,32 @@
 	ontouchstart={handleTouchStart}
 	ontouchmove={handleTouchMove}
 	ontouchend={handleTouchEnd}
-	style="
-		position: absolute;
-		top: 0;
-		left: 0;
-		width: 100%;
-		height: 100%;
-		pointer-events: {enabled ? 'auto' : 'none'};
-		z-index: 1;
-		opacity: {opacity};
-	"
+	style:position="absolute"
+	style:top="0"
+	style:left="0"
+	style:width="100%"
+	style:height="100%"
+	style:pointer-events={enabled ? 'auto' : 'none'}
+	style:z-index="1"
+	style:opacity={opacity}
 	aria-label="Interactive particle animation background"
 	aria-hidden={!enabled}
-	role="application"
 ></canvas>
 
 <style>
 	.particle-canvas {
 		display: block;
-		transition: opacity 0.3s ease;
+		transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 		will-change: transform;
+		touch-action: none;
 	}
 	
 	.particle-canvas.enabled {
-		cursor: none;
+		cursor: crosshair;
 	}
 	
 	.particle-canvas.mobile {
-		touch-action: manipulation;
+		touch-action: pan-x pan-y;
 	}
 	
 	.particle-canvas.high-performance {
@@ -920,13 +994,19 @@
 	
 	@media (prefers-reduced-motion: reduce) {
 		.particle-canvas {
-			display: none;
+			opacity: 0.3;
 		}
 	}
 	
 	@media (max-width: 768px) {
+		.particle-canvas.enabled {
+			cursor: default;
+		}
+	}
+	
+	@media (hover: none) and (pointer: coarse) {
 		.particle-canvas {
-			pointer-events: none;
+			touch-action: manipulation;
 		}
 	}
 </style>
