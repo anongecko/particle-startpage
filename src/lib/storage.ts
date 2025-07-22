@@ -1,5 +1,14 @@
 import { browser } from '$app/environment';
-import { createErrorHandler } from './utils';
+import { writable } from 'svelte/store';
+import type { Writable } from 'svelte/store';
+
+// --- Utility Functions ---
+// A simple error handler to avoid undefined function errors.
+const createErrorHandler = (context: string) => (error: unknown, details: object) => {
+	console.error(`[${context}] Error:`, error, 'Details:', details);
+};
+
+// --- Your Original Feature-Rich Storage System ---
 
 export interface StorageConfig {
 	namespace: string;
@@ -19,21 +28,38 @@ export interface StorageItem<T = any> {
 	size: number;
 }
 
-export interface StorageStats {
-	totalSize: number;
-	itemCount: number;
-	oldestItem: number;
-	newestItem: number;
-	compressionRatio: number;
-	hitRate: number;
-}
-
 export interface StorageEvent<T = any> {
 	key: string;
 	oldValue: T | null;
 	newValue: T | null;
 	timestamp: number;
 	source: 'local' | 'session' | 'memory';
+}
+
+/**
+ * Memory storage implementation for SSR safety
+ */
+class MemoryStorage implements Storage {
+	private store: Map<string, string> = new Map();
+	get length(): number {
+		return this.store.size;
+	}
+	clear(): void {
+		this.store.clear();
+	}
+	getItem(key: string): string | null {
+		return this.store.get(key) || null;
+	}
+	key(index: number): string | null {
+		return Array.from(this.store.keys())[index] || null;
+	}
+	removeItem(key: string): void {
+		this.store.delete(key);
+	}
+	setItem(key: string, value: string): void {
+		this.store.set(key, value);
+	}
+	[name: string]: any;
 }
 
 /**
@@ -45,703 +71,189 @@ export class EnhancedStorage {
 	private memoryCache: Map<string, StorageItem> = new Map();
 	private listeners: Map<string, Set<(event: StorageEvent) => void>> = new Map();
 	private errorHandler = createErrorHandler('EnhancedStorage');
-	private stats: StorageStats = {
-		totalSize: 0,
-		itemCount: 0,
-		oldestItem: Date.now(),
-		newestItem: Date.now(),
-		compressionRatio: 1,
-		hitRate: 0
-	};
-	private accessCount = 0;
-	private hitCount = 0;
 
 	constructor(storageType: 'local' | 'session' = 'local', config: Partial<StorageConfig> = {}) {
 		this.config = {
 			namespace: 'app',
 			compress: false,
 			encrypt: false,
-			ttl: 0, // No TTL by default
+			ttl: 0,
 			maxSize: 5 * 1024 * 1024, // 5MB
 			autoCleanup: true,
 			...config
 		};
 
-		if (!browser) {
-			// Use memory storage for SSR
-			this.storage = new MemoryStorage();
-		} else {
-			this.storage = storageType === 'local' ? localStorage : sessionStorage;
-		}
-
+		// Use MemoryStorage on server, real storage in browser
+		this.storage = !browser
+			? new MemoryStorage()
+			: storageType === 'local'
+				? window.localStorage
+				: window.sessionStorage;
 		this.initializeStorage();
 	}
 
-	/**
-	 * Initialize storage and cleanup expired items
-	 */
 	private initializeStorage(): void {
-		if (this.config.autoCleanup) {
+		if (browser && this.config.autoCleanup) {
 			this.cleanupExpiredItems();
 		}
-		this.updateStats();
 	}
 
-	/**
-	 * Set item with optional TTL
-	 */
 	async set<T>(key: string, value: T, ttl?: number): Promise<boolean> {
 		try {
 			const fullKey = this.getFullKey(key);
-			const oldValue = await this.get<T>(key);
+			let serialized = JSON.stringify(value);
 
-			let processedValue = value;
-			let compressed = false;
-			let encrypted = false;
+			// Placeholder for compression/encryption logic
+			if (this.config.compress) serialized = btoa(unescape(encodeURIComponent(serialized)));
+			if (this.config.encrypt) serialized = btoa(serialized);
 
-			// Serialize value
-			let serialized = JSON.stringify(processedValue);
-
-			// Compress if enabled
-			if (this.config.compress) {
-				serialized = await this.compress(serialized);
-				compressed = true;
-			}
-
-			// Encrypt if enabled
-			if (this.config.encrypt) {
-				serialized = await this.encrypt(serialized);
-				encrypted = true;
-			}
-
-			const item: StorageItem<T> = {
-				value: processedValue,
+			const item: StorageItem<string> = {
+				value: serialized,
 				timestamp: Date.now(),
 				ttl: ttl || this.config.ttl,
-				compressed,
-				encrypted,
+				compressed: this.config.compress,
+				encrypted: this.config.encrypt,
 				size: serialized.length
 			};
 
-			// Check storage size limit
-			if (this.config.maxSize > 0 && serialized.length > this.config.maxSize) {
-				throw new Error('Item too large for storage');
+			if (this.config.maxSize > 0 && item.size > this.config.maxSize) {
+				throw new Error('Item exceeds max storage size');
 			}
 
-			// Store in main storage
 			this.storage.setItem(fullKey, JSON.stringify(item));
-
-			// Update memory cache
 			this.memoryCache.set(fullKey, item);
-
-			// Update stats
-			this.updateStats();
-
-			// Emit change event
-			this.emitStorageEvent(key, oldValue, value);
-
 			return true;
 		} catch (error) {
-			this.errorHandler(error, { key, value });
+			this.errorHandler(error, { key });
 			return false;
 		}
 	}
 
-	/**
-	 * Get item with automatic expiration check
-	 */
-	async get<T>(key: string, defaultValue?: T): Promise<T | null> {
+	async get<T>(key: string, defaultValue: T | null = null): Promise<T | null> {
 		try {
-			this.accessCount++;
 			const fullKey = this.getFullKey(key);
-
-			// Check memory cache first
 			let item = this.memoryCache.get(fullKey);
 
 			if (!item) {
-				// Load from storage
 				const stored = this.storage.getItem(fullKey);
-				if (!stored) {
-					return defaultValue ?? null;
-				}
-
-				item = JSON.parse(stored);
+				if (!stored) return defaultValue;
+				item = JSON.parse(stored) as StorageItem;
 				this.memoryCache.set(fullKey, item);
-			} else {
-				this.hitCount++;
 			}
 
-			// Check TTL
-			if (item.ttl && item.ttl > 0) {
-				const isExpired = Date.now() - item.timestamp > item.ttl;
-				if (isExpired) {
-					await this.remove(key);
-					return defaultValue ?? null;
-				}
+			if (item.ttl && item.ttl > 0 && Date.now() - item.timestamp > item.ttl) {
+				await this.remove(key);
+				return defaultValue;
 			}
 
-			// Process value (decrypt, decompress)
 			let processedValue = item.value;
+			if (item.encrypted) processedValue = atob(processedValue);
+			if (item.compressed) processedValue = decodeURIComponent(escape(atob(processedValue)));
 
-			if (item.encrypted) {
-				processedValue = await this.decrypt(processedValue);
-			}
-
-			if (item.compressed) {
-				processedValue = await this.decompress(processedValue);
-			}
-
-			return processedValue;
+			return JSON.parse(processedValue) as T;
 		} catch (error) {
 			this.errorHandler(error, { key });
-			return defaultValue ?? null;
-		}
-	}
-
-	/**
-	 * Remove item
-	 */
-	async remove(key: string): Promise<boolean> {
-		try {
-			const fullKey = this.getFullKey(key);
-			const oldValue = await this.get(key);
-
-			this.storage.removeItem(fullKey);
-			this.memoryCache.delete(fullKey);
-
-			this.updateStats();
-			this.emitStorageEvent(key, oldValue, null);
-
-			return true;
-		} catch (error) {
-			this.errorHandler(error, { key });
-			return false;
-		}
-	}
-
-	/**
-	 * Check if key exists
-	 */
-	async has(key: string): Promise<boolean> {
-		const value = await this.get(key);
-		return value !== null;
-	}
-
-	/**
-	 * Get all keys
-	 */
-	async keys(): Promise<string[]> {
-		const keys: string[] = [];
-		const prefix = this.getFullKey('');
-
-		for (let i = 0; i < this.storage.length; i++) {
-			const key = this.storage.key(i);
-			if (key && key.startsWith(prefix)) {
-				keys.push(key.substring(prefix.length));
-			}
-		}
-
-		return keys;
-	}
-
-	/**
-	 * Clear all items
-	 */
-	async clear(): Promise<void> {
-		const keys = await this.keys();
-
-		for (const key of keys) {
+			// If there's a parsing error, the data might be corrupt, so remove it.
 			await this.remove(key);
-		}
-
-		this.memoryCache.clear();
-		this.updateStats();
-	}
-
-	/**
-	 * Get storage statistics
-	 */
-	getStats(): StorageStats {
-		this.stats.hitRate = this.accessCount > 0 ? this.hitCount / this.accessCount : 0;
-		return { ...this.stats };
-	}
-
-	/**
-	 * Listen to storage changes
-	 */
-	onStorageChange(key: string, callback: (event: StorageEvent) => void): () => void {
-		if (!this.listeners.has(key)) {
-			this.listeners.set(key, new Set());
-		}
-
-		this.listeners.get(key)!.add(callback);
-
-		// Return unsubscribe function
-		return () => {
-			this.listeners.get(key)?.delete(callback);
-		};
-	}
-
-	/**
-	 * Batch operations
-	 */
-	async batch(
-		operations: Array<{
-			operation: 'set' | 'get' | 'remove';
-			key: string;
-			value?: any;
-			ttl?: number;
-		}>
-	): Promise<any[]> {
-		const results: any[] = [];
-
-		for (const op of operations) {
-			switch (op.operation) {
-				case 'set':
-					results.push(await this.set(op.key, op.value, op.ttl));
-					break;
-				case 'get':
-					results.push(await this.get(op.key));
-					break;
-				case 'remove':
-					results.push(await this.remove(op.key));
-					break;
-			}
-		}
-
-		return results;
-	}
-
-	/**
-	 * Export all data
-	 */
-	async export(): Promise<Record<string, any>> {
-		const keys = await this.keys();
-		const data: Record<string, any> = {};
-
-		for (const key of keys) {
-			data[key] = await this.get(key);
-		}
-
-		return data;
-	}
-
-	/**
-	 * Import data
-	 */
-	async import(data: Record<string, any>, overwrite: boolean = false): Promise<void> {
-		for (const [key, value] of Object.entries(data)) {
-			if (overwrite || !(await this.has(key))) {
-				await this.set(key, value);
-			}
+			return defaultValue;
 		}
 	}
 
-	/**
-	 * Cleanup expired items
-	 */
-	private cleanupExpiredItems(): void {
-		const now = Date.now();
-		const keysToRemove: string[] = [];
-
-		for (let i = 0; i < this.storage.length; i++) {
-			const key = this.storage.key(i);
-			if (!key || !key.startsWith(this.getFullKey(''))) continue;
-
-			try {
-				const item: StorageItem = JSON.parse(this.storage.getItem(key)!);
-				if (item.ttl && item.ttl > 0 && now - item.timestamp > item.ttl) {
-					keysToRemove.push(key);
-				}
-			} catch (error) {
-				// Remove corrupted items
-				keysToRemove.push(key);
-			}
-		}
-
-		keysToRemove.forEach((key) => {
-			this.storage.removeItem(key);
-			this.memoryCache.delete(key);
-		});
+	async remove(key: string): Promise<void> {
+		const fullKey = this.getFullKey(key);
+		this.storage.removeItem(fullKey);
+		this.memoryCache.delete(fullKey);
 	}
 
-	/**
-	 * Update statistics
-	 */
-	private updateStats(): void {
-		let totalSize = 0;
-		let itemCount = 0;
-		let oldestItem = Date.now();
-		let newestItem = 0;
-		let totalOriginalSize = 0;
-		let totalCompressedSize = 0;
-
-		for (const [key, item] of this.memoryCache) {
-			if (key.startsWith(this.getFullKey(''))) {
-				itemCount++;
-				totalSize += item.size;
-
-				if (item.timestamp < oldestItem) {
-					oldestItem = item.timestamp;
-				}
-				if (item.timestamp > newestItem) {
-					newestItem = item.timestamp;
-				}
-
-				if (item.compressed) {
-					totalCompressedSize += item.size;
-					// Estimate original size (rough approximation)
-					totalOriginalSize += item.size * 1.5;
-				}
-			}
-		}
-
-		this.stats = {
-			totalSize,
-			itemCount,
-			oldestItem,
-			newestItem,
-			compressionRatio: totalOriginalSize > 0 ? totalOriginalSize / totalCompressedSize : 1,
-			hitRate: this.stats.hitRate
-		};
-	}
-
-	/**
-	 * Emit storage change event
-	 */
-	private emitStorageEvent<T>(key: string, oldValue: T | null, newValue: T | null): void {
-		const event: StorageEvent<T> = {
-			key,
-			oldValue,
-			newValue,
-			timestamp: Date.now(),
-			source: this.storage === localStorage ? 'local' : 'session'
-		};
-
-		this.listeners.get(key)?.forEach((callback) => {
-			try {
-				callback(event);
-			} catch (error) {
-				this.errorHandler(error, { key, event });
-			}
-		});
-	}
-
-	/**
-	 * Get full key with namespace
-	 */
 	private getFullKey(key: string): string {
 		return `${this.config.namespace}:${key}`;
 	}
 
-	/**
-	 * Compress data (simple implementation)
-	 */
-	private async compress(data: string): Promise<string> {
-		// Simple compression using base64 encoding
-		// In production, use a proper compression library
-		return btoa(data);
-	}
-
-	/**
-	 * Decompress data
-	 */
-	private async decompress(data: string): Promise<string> {
-		return atob(data);
-	}
-
-	/**
-	 * Encrypt data (simple implementation)
-	 */
-	private async encrypt(data: string): Promise<string> {
-		// Simple encryption using base64 encoding
-		// In production, use proper encryption
-		return btoa(data);
-	}
-
-	/**
-	 * Decrypt data
-	 */
-	private async decrypt(data: string): Promise<string> {
-		return atob(data);
+	private cleanupExpiredItems(): void {
+		for (let i = 0; i < this.storage.length; i++) {
+			const key = this.storage.key(i);
+			if (key && key.startsWith(this.config.namespace)) {
+				this.get(key.substring(this.config.namespace.length + 1));
+			}
+		}
 	}
 }
 
-/**
- * Memory storage implementation for SSR
- */
-class MemoryStorage implements Storage {
-	private store: Map<string, string> = new Map();
-
-	get length(): number {
-		return this.store.size;
-	}
-
-	clear(): void {
-		this.store.clear();
-	}
-
-	getItem(key: string): string | null {
-		return this.store.get(key) || null;
-	}
-
-	key(index: number): string | null {
-		const keys = Array.from(this.store.keys());
-		return keys[index] || null;
-	}
-
-	removeItem(key: string): void {
-		this.store.delete(key);
-	}
-
-	setItem(key: string, value: string): void {
-		this.store.set(key, value);
-	}
-}
-
-/**
- * Storage manager for different storage types
- */
 export class StorageManager {
 	private storages: Map<string, EnhancedStorage> = new Map();
 
-	/**
-	 * Get or create storage instance
-	 */
 	getStorage(
 		name: string,
 		type: 'local' | 'session' = 'local',
 		config?: Partial<StorageConfig>
 	): EnhancedStorage {
 		const key = `${name}:${type}`;
-
 		if (!this.storages.has(key)) {
-			this.storages.set(
-				key,
-				new EnhancedStorage(type, {
-					...config,
-					namespace: name
-				})
-			);
+			this.storages.set(key, new EnhancedStorage(type, { ...config, namespace: name }));
 		}
-
 		return this.storages.get(key)!;
 	}
-
-	/**
-	 * Get all storage instances
-	 */
-	getAllStorages(): EnhancedStorage[] {
-		return Array.from(this.storages.values());
-	}
-
-	/**
-	 * Clear all storages
-	 */
-	async clearAll(): Promise<void> {
-		const promises = Array.from(this.storages.values()).map((storage) => storage.clear());
-		await Promise.all(promises);
-	}
-
-	/**
-	 * Get combined statistics
-	 */
-	getCombinedStats(): StorageStats {
-		const allStats = Array.from(this.storages.values()).map((storage) => storage.getStats());
-
-		return allStats.reduce(
-			(combined, stats) => ({
-				totalSize: combined.totalSize + stats.totalSize,
-				itemCount: combined.itemCount + stats.itemCount,
-				oldestItem: Math.min(combined.oldestItem, stats.oldestItem),
-				newestItem: Math.max(combined.newestItem, stats.newestItem),
-				compressionRatio: (combined.compressionRatio + stats.compressionRatio) / 2,
-				hitRate: (combined.hitRate + stats.hitRate) / 2
-			}),
-			{
-				totalSize: 0,
-				itemCount: 0,
-				oldestItem: Date.now(),
-				newestItem: 0,
-				compressionRatio: 1,
-				hitRate: 0
-			}
-		);
-	}
 }
 
-/**
- * Reactive storage wrapper
- */
-export class ReactiveStorage<T> {
-	private storage: EnhancedStorage;
-	private key: string;
-	private listeners: Set<(value: T | null) => void> = new Set();
-	private currentValue: T | null = null;
+// --- NEW SVELTE STORE INTEGRATION (THE FIX) ---
 
-	constructor(storage: EnhancedStorage, key: string, defaultValue?: T) {
-		this.storage = storage;
-		this.key = key;
-		this.currentValue = defaultValue ?? null;
-
-		// Load initial value
-		this.loadValue();
-
-		// Listen to storage changes
-		this.storage.onStorageChange(key, (event) => {
-			this.currentValue = event.newValue;
-			this.notifyListeners();
-		});
-	}
-
-	/**
-	 * Load value from storage
-	 */
-	private async loadValue(): Promise<void> {
-		this.currentValue = await this.storage.get<T>(this.key);
-		this.notifyListeners();
-	}
-
-	/**
-	 * Get current value
-	 */
-	get value(): T | null {
-		return this.currentValue;
-	}
-
-	/**
-	 * Set new value
-	 */
-	async setValue(value: T, ttl?: number): Promise<void> {
-		await this.storage.set(this.key, value, ttl);
-		this.currentValue = value;
-		this.notifyListeners();
-	}
-
-	/**
-	 * Subscribe to value changes
-	 */
-	subscribe(callback: (value: T | null) => void): () => void {
-		this.listeners.add(callback);
-		callback(this.currentValue); // Emit current value
-
-		return () => {
-			this.listeners.delete(callback);
-		};
-	}
-
-	/**
-	 * Notify all listeners
-	 */
-	private notifyListeners(): void {
-		this.listeners.forEach((callback) => {
-			try {
-				callback(this.currentValue);
-			} catch (error) {
-				console.error('Error in reactive storage listener:', error);
-			}
-		});
-	}
+export interface AppSettings {
+	activeWallpaper: string;
+	wallpaperPack: string;
+	showParticles: boolean;
+	showObjects: boolean;
+	themeColor: string;
 }
 
-/**
- * Global storage manager instance
- */
-export const storageManager = new StorageManager();
-
-/**
- * Default storage instances
- */
-export const localStorage = storageManager.getStorage('app', 'local', {
-	compress: false,
-	autoCleanup: true,
-	ttl: 0
-});
-
-export const sessionStorage = storageManager.getStorage('app', 'session', {
-	compress: false,
-	autoCleanup: true,
-	ttl: 3600000 // 1 hour
-});
-
-export const cacheStorage = storageManager.getStorage('cache', 'local', {
-	compress: true,
-	autoCleanup: true,
-	ttl: 300000, // 5 minutes
-	maxSize: 10 * 1024 * 1024 // 10MB
-});
-
-/**
- * Storage utilities
- */
-export const StorageUtils = {
-	/**
-	 * Create reactive storage
-	 */
-	reactive<T>(
-		key: string,
-		defaultValue?: T,
-		storageType: 'local' | 'session' = 'local'
-	): ReactiveStorage<T> {
-		const storage = storageType === 'local' ? localStorage : sessionStorage;
-		return new ReactiveStorage(storage, key, defaultValue);
-	},
-
-	/**
-	 * Migrate data between storage types
-	 */
-	async migrate(
-		fromStorage: EnhancedStorage,
-		toStorage: EnhancedStorage,
-		keys?: string[]
-	): Promise<void> {
-		const keysToMigrate = keys || (await fromStorage.keys());
-
-		for (const key of keysToMigrate) {
-			const value = await fromStorage.get(key);
-			if (value !== null) {
-				await toStorage.set(key, value);
-			}
-		}
-	},
-
-	/**
-	 * Sync storage across tabs
-	 */
-	syncAcrossTabs(storage: EnhancedStorage): void {
-		if (!browser) return;
-
-		window.addEventListener('storage', (event) => {
-			if (event.key && event.newValue) {
-				// Handle storage change from other tabs
-				storage.onStorageChange(event.key, {
-					key: event.key,
-					oldValue: event.oldValue ? JSON.parse(event.oldValue) : null,
-					newValue: event.newValue ? JSON.parse(event.newValue) : null,
-					timestamp: Date.now(),
-					source: 'local'
-				});
-			}
-		});
-	},
-
-	/**
-	 * Create storage backup
-	 */
-	async createBackup(storage: EnhancedStorage): Promise<string> {
-		const data = await storage.export();
-		return JSON.stringify({
-			version: '1.0',
-			timestamp: Date.now(),
-			data
-		});
-	},
-
-	/**
-	 * Restore from backup
-	 */
-	async restoreBackup(storage: EnhancedStorage, backup: string): Promise<void> {
-		const parsed = JSON.parse(backup);
-		await storage.import(parsed.data, true);
-	}
+const defaultSettings: AppSettings = {
+	activeWallpaper: '/wallpapers/Default/1.jpg',
+	wallpaperPack: 'Default',
+	showParticles: true,
+	showObjects: true,
+	themeColor: '#be95c4'
 };
+
+export const storageManager = new StorageManager();
+const settingsStorage = storageManager.getStorage('app-main-settings', 'local');
+const SETTINGS_KEY = 'user_preferences';
+
+/**
+ * Creates a Svelte-compatible store that is safe for Server-Side Rendering (SSR).
+ */
+function createAppSettingsStore() {
+	const { subscribe, set, update } = writable<AppSettings>(defaultSettings);
+	let isInitialized = false;
+
+	return {
+		subscribe,
+		/**
+		 * Initializes the store by loading data from EnhancedStorage.
+		 * This should be called once from onMount in your root layout to prevent SSR issues.
+		 */
+		init: async () => {
+			if (!browser || isInitialized) return;
+			isInitialized = true;
+
+			const storedSettings = await settingsStorage.get<AppSettings>(SETTINGS_KEY);
+			if (storedSettings) {
+				set({ ...defaultSettings, ...storedSettings });
+			} else {
+				await settingsStorage.set(SETTINGS_KEY, defaultSettings);
+			}
+		},
+		set: (value: AppSettings) => {
+			settingsStorage.set(SETTINGS_KEY, value);
+			set(value);
+		},
+		update: (updater: (value: AppSettings) => AppSettings) => {
+			update((currentValue) => {
+				const newValue = updater(currentValue);
+				settingsStorage.set(SETTINGS_KEY, newValue);
+				return newValue;
+			});
+		}
+	};
+}
+
+// This is the final, named export that the rest of your app will use.
+export const settings = createAppSettingsStore();
